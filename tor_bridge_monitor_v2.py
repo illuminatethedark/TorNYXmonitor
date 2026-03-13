@@ -9,12 +9,12 @@ Requirements:
     pip install paramiko pyte
 """
 
-__version__ = "0.2.1"
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  Standard library
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
+
+__version__ = "0.2.1"
 
 import collections
 import datetime
