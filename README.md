@@ -51,22 +51,127 @@ sudo cat /var/run/tor/control.authcookie   # for cookie auth
 
 ## Running
 
-```
-python tor_bridge_monitor_v2.py
+### Windows
+```bat
+python tor_bridge_monitor.py
 ```
 
-## Building (Windows, PyInstaller)
+### Linux / macOS
+1. Install system dependencies (if not already present):
+   ```bash
+   # Debian / Ubuntu
+   sudo apt update
+   sudo apt install python3 python3-pip python3-tk
 
+   # Fedora
+   sudo dnf install python3 python3-pip python3-tkinter
+
+   # Arch
+   sudo pacman -S python python-pip tk
+   ```
+
+2. Install Python dependencies:
+   ```bash
+   pip install paramiko pyte
+   ```
+
+3. Run:
+   ```bash
+   python3 tor_bridge_monitor.py
+   ```
+   Or use the launcher script directly:
+   ```bash
+   chmod +x linux/launch.sh
+   ./linux/launch.sh
+   ```
+
+### Linux — Desktop shortcut (launchable icon)
+
+Run the installer once from the app folder:
+```bash
+chmod +x linux/unix_install_desktop.sh
+./linux/unix_install_desktop.sh
 ```
-build_v2.bat
+
+The installer handles everything in one step:
+
+1. **System packages** — detects your package manager (`apt` / `dnf` / `pacman`),
+   shows a confirmation dialog listing what will be installed, then prompts for
+   your password via a GUI window (`pkexec` / `zenity`) to install
+   `python3`, `python3-tk`, and `python3-venv` if any are missing
+2. **Python dependencies** — creates a local `venv/` in the app folder and
+   installs `paramiko` and `pyte` into it (no sudo required)
+3. **Desktop shortcut** — writes `tor_bridge_monitor.desktop` with absolute
+   paths, registers it in `~/.local/share/applications/` (applications menu),
+   and places a trusted, clickable icon on `~/Desktop` if the folder exists
+
+A completion dialog confirms when setup is done.
+
+To uninstall the shortcut:
+```bash
+rm ~/.local/share/applications/tor_bridge_monitor.desktop
+rm ~/Desktop/tor_bridge_monitor.desktop   # if created
+```
+
+## Building
+
+### Windows
+```bat
+windows\windows_build.bat
 ```
 Produces `dist\Tor NYX Monitor v0.2.1.exe` (~17 MB, single file).
 
-> **Linux/macOS:** `build_v2.bat` is Windows-only. You can build a native binary with PyInstaller directly:
-> ```
-> pip install pyinstaller
-> pyinstaller --onefile tor_bridge_monitor_v2.py
-> ```
+### Linux (PyInstaller)
+
+1. Install PyInstaller and all dependencies:
+   ```bash
+   pip install paramiko pyte pyinstaller PyNaCl cryptography
+   ```
+
+2. Build a single-file binary:
+   ```bash
+   pyinstaller --onefile \
+       --name "Tor NYX Monitor" \
+       --hidden-import paramiko \
+       --hidden-import paramiko.transport \
+       --hidden-import paramiko.auth_handler \
+       --hidden-import paramiko.channel \
+       --hidden-import paramiko.client \
+       --hidden-import paramiko.pkey \
+       --hidden-import paramiko.rsakey \
+       --hidden-import paramiko.ecdsakey \
+       --hidden-import paramiko.ed25519key \
+       --hidden-import paramiko.sftp \
+       --hidden-import paramiko.sftp_client \
+       --hidden-import paramiko.packet \
+       --hidden-import paramiko.compress \
+       --hidden-import paramiko.kex_ecdh_nist \
+       --hidden-import paramiko.kex_curve25519 \
+       --hidden-import paramiko.kex_group14 \
+       --hidden-import paramiko.kex_gex \
+       --hidden-import pyte \
+       --hidden-import pyte.modes \
+       --hidden-import pyte.screens \
+       --hidden-import pyte.streams \
+       --hidden-import pyte.graphics \
+       --hidden-import cryptography \
+       --hidden-import cryptography.hazmat.primitives \
+       --hidden-import cryptography.hazmat.backends \
+       --hidden-import nacl \
+       --hidden-import nacl.signing \
+       --clean --noconfirm \
+       tor_bridge_monitor.py
+   ```
+
+3. The binary is written to `dist/Tor NYX Monitor`.
+   Make it executable and run it:
+   ```bash
+   chmod +x "dist/Tor NYX Monitor"
+   "./dist/Tor NYX Monitor"
+   ```
+
+> **Note:** Some distributions require `python3-tk` to be installed system-wide
+> even when using a virtualenv — it cannot be installed via pip.
 
 ## Cross-platform notes
 
@@ -77,7 +182,7 @@ The app runs on Windows, Linux, and macOS. All core functionality is platform-ne
 | Core monitoring & SSH | ✓ | ✓ | ✓ |
 | Tor control port dashboard | ✓ | ✓ | ✓ |
 | Dark title bar | ✓ | — | — |
-| `.exe` build via `build_v2.bat` | ✓ | — | — |
+| `.exe` build via `windows/windows_build.bat` | ✓ | — | — |
 
 ## Config & logs
 

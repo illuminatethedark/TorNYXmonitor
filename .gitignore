@@ -43,3 +43,6 @@ ehthumbs.db
 venv/
 env/
 ENV/
+
+# ── Archive (local only — old versions, not part of the repo) ────────────────
+Archive/

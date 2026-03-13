@@ -84,6 +84,28 @@ _log = _make_logger()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  UI scale  (resolution-aware sizing)
+# ─────────────────────────────────────────────────────────────────────────────
+def _compute_ui_scale(root: tk.Tk) -> float:
+    """Return a UI scale factor derived from the screen resolution.
+
+    Baseline: 1920×1080 → 1.0.
+    Smaller screens get a factor < 1.0 so the UI shrinks to fit.
+    Larger / HiDPI screens get a factor > 1.0 for better readability.
+    Clamped to [0.65, 1.8] to prevent extremes.
+
+    tkinter reports *logical* pixels, so Windows DPI scaling (e.g. 150 %)
+    is already factored in — no extra DPI query needed.
+    """
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    scale = min(sw / 1920.0, sh / 1080.0)
+    scale = max(0.65, min(1.8, scale))
+    _log.info("Screen %dx%d → UI scale %.2f", sw, sh, scale)
+    return scale
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Config
 # ─────────────────────────────────────────────────────────────────────────────
 def load_config() -> dict:
@@ -1140,8 +1162,9 @@ class DashboardPanel(tk.Frame):
     # Graph modes
     GRAPH_MODES = ["Bandwidth", "Connections", "Resources"]
 
-    def __init__(self, parent, **kw):
+    def __init__(self, parent, scale: float = 1.0, **kw):
         super().__init__(parent, bg=self.BG, **kw)
+        self._scale = scale
         # Bandwidth history
         self._bw_read    = collections.deque([0] * self.HISTORY_LEN,
                                               maxlen=self.HISTORY_LEN)
@@ -1180,13 +1203,19 @@ class DashboardPanel(tk.Frame):
                 continue
         return tkfont.Font(size=size, weight="bold" if bold else "normal")
 
+    def _s(self, n: int) -> int:
+        return max(1, round(n * self._scale))
+
+    def _sf(self, n: int) -> int:
+        return max(7, round(n * self._scale))
+
     # ── construction ────────────────────────────────────────────────────────
     def _build(self):
         # Store all font objects as instance attrs — prevents GC from
         # deleting them while Tk widgets still hold a reference.
-        self._fmono_s = self._f(["Cascadia Code", "Consolas", "Courier New"], 9)
-        self._fui_s   = self._f(["Segoe UI", "Helvetica Neue", "Arial"], 9)
-        self._ffp     = self._f(["Cascadia Code", "Consolas", "Courier New"], 8)
+        self._fmono_s = self._f(["Cascadia Code", "Consolas", "Courier New"], self._sf(9))
+        self._fui_s   = self._f(["Segoe UI", "Helvetica Neue", "Arial"], self._sf(9))
+        self._ffp     = self._f(["Cascadia Code", "Consolas", "Courier New"], self._sf(8))
 
         # ── top-level grid: fixed rows for bw + identity, events row expands ──
         # row 0 = bandwidth, row 1 = sep, row 2 = identity/connections,
@@ -1199,7 +1228,7 @@ class DashboardPanel(tk.Frame):
         self.rowconfigure(1, weight=0)
         self.rowconfigure(2, weight=0)
         self.rowconfigure(3, weight=0)
-        self.rowconfigure(4, weight=1, minsize=80)
+        self.rowconfigure(4, weight=1, minsize=self._s(80))
         self.columnconfigure(0, weight=1)
 
         # ── bandwidth section ─────────────────────────────────────────────
@@ -1219,7 +1248,7 @@ class DashboardPanel(tk.Frame):
                                     fg=self.COL_WRITE, bg=self.BG)
         self._lbl_write.pack(side="right")
 
-        self._bw_canvas = tk.Canvas(bw_frame, bg=self.PANEL, height=110,
+        self._bw_canvas = tk.Canvas(bw_frame, bg=self.PANEL, height=self._s(110),
                                      highlightthickness=1,
                                      highlightbackground=self.BORDER)
         self._bw_canvas.pack(fill="x")
@@ -1232,7 +1261,7 @@ class DashboardPanel(tk.Frame):
         tk.Frame(self, bg=self.BORDER, height=1).grid(row=1, column=0, sticky="ew", padx=20, pady=(16, 0))
 
         # ── two-column middle section (identity + connections) ────────────
-        lower = tk.Frame(self, bg=self.BG, height=200)
+        lower = tk.Frame(self, bg=self.BG, height=self._s(200))
         lower.grid(row=2, column=0, sticky="ew", padx=20, pady=(14, 0))
         lower.pack_propagate(False)
         lower.grid_propagate(False)
@@ -1743,6 +1772,7 @@ class TorMonitorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.cfg  = load_config()
+        self._sc  = _compute_ui_scale(root)   # resolution scale factor
 
         # Worker handles — always None when not running
         self._ssh : SSHWorker  | None = None
@@ -1769,7 +1799,7 @@ class TorMonitorApp:
         self._spin_id     = None
         self._spin_lbl    = None
         self._overlay_lbl = None
-        self._log_height  = 160
+        self._log_height  = self._s(160)
         self._last_poll_time = time.time()   # for sleep-wake detection
 
         _log.info("=" * 60)
@@ -1791,6 +1821,14 @@ class TorMonitorApp:
                 return (f, size, "bold" if bold else "normal")
         return ("Courier New", size, "bold" if bold else "normal")
 
+    def _s(self, n: int) -> int:
+        """Scale a pixel dimension by the screen resolution factor."""
+        return max(1, round(n * self._sc))
+
+    def _sf(self, n: int) -> int:
+        """Scale a font point size (minimum 7 pt)."""
+        return max(7, round(n * self._sc))
+
     def _build_ui(self):
         self.root.title(f"Tor NYX Monitor  v{__version__}")
 
@@ -1805,25 +1843,25 @@ class TorMonitorApp:
         except Exception:
             pass
         self.root.configure(bg=self.BG)
-        self.root.geometry("1200x780")
-        self.root.minsize(900, 680)
+        self.root.geometry(f"{self._s(1200)}x{self._s(780)}")
+        self.root.minsize(self._s(900), self._s(680))
 
-        title = self._font(["Segoe UI", "Arial"], 13, bold=True)
-        label = self._font(["Segoe UI", "Arial"], 10)
-        small = self._font(["Segoe UI", "Arial"], 9)
-        mono  = self._font(["Cascadia Code", "Consolas", "Courier New"], 11)
+        title = self._font(["Segoe UI", "Arial"], self._sf(13), bold=True)
+        label = self._font(["Segoe UI", "Arial"], self._sf(10))
+        small = self._font(["Segoe UI", "Arial"], self._sf(9))
+        mono  = self._font(["Cascadia Code", "Consolas", "Courier New"], self._sf(11))
 
         # ── top bar ──────────────────────────────────────────────────────────
-        topbar = tk.Frame(self.root, bg=self.BG, height=56)
+        topbar = tk.Frame(self.root, bg=self.BG, height=self._s(56))
         topbar.pack(fill="x")
         topbar.pack_propagate(False)
 
-        tk.Label(topbar, text="⬡", font=("Segoe UI", 22),
+        tk.Label(topbar, text="⬡", font=("Segoe UI", self._sf(22)),
                  fg=self.ACCENT, bg=self.BG).pack(side="left", padx=(18, 6))
         tk.Label(topbar, text="Tor NYX Monitor", font=title,
                  fg=self.TEXT, bg=self.BG).pack(side="left")
 
-        self._status_dot   = tk.Label(topbar, text="●", font=("Segoe UI", 14),
+        self._status_dot   = tk.Label(topbar, text="●", font=("Segoe UI", self._sf(14)),
                                        fg=self.TEXT_DIM, bg=self.BG)
         self._status_dot.pack(side="right", padx=(0, 10))
         self._status_lbl   = tk.Label(topbar, text="Not connected",
@@ -1845,7 +1883,7 @@ class TorMonitorApp:
         # If packed after expand=True body, it gets squeezed to zero at min height.
         self._statusbar_sep = tk.Frame(self.root, bg=self.BORDER, height=1)
         self._statusbar_sep.pack(side="bottom", fill="x")
-        bar = tk.Frame(self.root, bg=self.PANEL, height=26)
+        bar = tk.Frame(self.root, bg=self.PANEL, height=self._s(26))
         bar.pack(side="bottom", fill="x")
         bar.pack_propagate(False)
 
@@ -1853,7 +1891,7 @@ class TorMonitorApp:
         self._body = tk.Frame(self.root, bg=self.BG)
         self._body.pack(fill="both", expand=True)
 
-        self._sidebar = tk.Frame(self._body, bg=self.PANEL, width=260)
+        self._sidebar = tk.Frame(self._body, bg=self.PANEL, width=self._s(260))
         self._sidebar.pack(side="left", fill="y")
         self._sidebar.pack_propagate(False)
         self._build_sidebar(self._sidebar, label, small, mono)
@@ -1888,7 +1926,7 @@ class TorMonitorApp:
         # Drag handle
         self._log_drag_y = None
         self._log_drag_h = None
-        log_handle = tk.Frame(self._log_frame, bg=self.BORDER, height=4,
+        log_handle = tk.Frame(self._log_frame, bg=self.BORDER, height=self._s(4),
                                cursor="sb_v_double_arrow")
         log_handle.pack(fill="x", side="top")
         log_handle.pack_propagate(False)
@@ -1904,7 +1942,7 @@ class TorMonitorApp:
         log_inner = tk.Frame(self._log_frame, bg=self.PANEL)
         log_inner.pack(fill="both", expand=True)
 
-        log_hdr = tk.Frame(log_inner, bg=self.PANEL, height=24)
+        log_hdr = tk.Frame(log_inner, bg=self.PANEL, height=self._s(24))
         log_hdr.pack(fill="x")
         log_hdr.pack_propagate(False)
         tk.Label(log_hdr, text="DEBUG LOG", font=small,
@@ -1922,7 +1960,7 @@ class TorMonitorApp:
 
         self._log_text = tk.Text(
             log_tf, bg="#090b10", fg="#64748b",
-            font=self._font(["Cascadia Code","Consolas","Courier New"], 8),
+            font=self._font(["Cascadia Code","Consolas","Courier New"], self._sf(8)),
             bd=0, highlightthickness=0, state="disabled", wrap="word",
             selectbackground=self.BORDER, insertbackground=self.TEXT)
         log_sb = ttk.Scrollbar(log_tf, orient="vertical",
@@ -1948,7 +1986,7 @@ class TorMonitorApp:
 
     def _build_right(self, right: tk.Frame, small):
         # Header bar
-        hdr = tk.Frame(right, bg=self.BG, height=34)
+        hdr = tk.Frame(right, bg=self.BG, height=self._s(34))
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
@@ -1999,12 +2037,13 @@ class TorMonitorApp:
         self._view_container = tk.Frame(right, bg=self.BG)
         self._view_container.pack(fill="both", expand=True)
 
-        self.dashboard = DashboardPanel(self._view_container)
+        self.dashboard = DashboardPanel(self._view_container, scale=self._sc)
         self.dashboard.pack(fill="both", expand=True)
 
         self.term = TerminalCanvas(self._view_container, self.TERM_COLS,
                                     self.TERM_ROWS,
-                                    font_name="Cascadia Code", font_size=11)
+                                    font_name="Cascadia Code",
+                                    font_size=self._sf(11))
         self.term._key_callback = self._on_term_event
 
     def _build_sidebar(self, sidebar: tk.Frame, label, small, mono):
@@ -2634,16 +2673,16 @@ class TorMonitorApp:
         col = tk.Frame(ov, bg=self.BG)
         col.grid(row=1, column=1)
 
-        tk.Label(col, text="⬡", font=("Segoe UI", 40),
+        tk.Label(col, text="⬡", font=("Segoe UI", self._sf(40)),
                  fg=self.ACCENT, bg=self.BG).pack(pady=(0, 16))
 
         self._spin_lbl = tk.Label(col, text="⠋",
-                                   font=self._font(["Segoe UI","Arial"], 18),
+                                   font=self._font(["Segoe UI","Arial"], self._sf(18)),
                                    fg=self.ACCENT, bg=self.BG)
         self._spin_lbl.pack()
 
         self._overlay_lbl = tk.Label(col, text=text,
-                                      font=self._font(["Segoe UI","Arial"], 11),
+                                      font=self._font(["Segoe UI","Arial"], self._sf(11)),
                                       fg=self.TEXT_DIM, bg=self.BG,
                                       wraplength=380, justify="center")
         self._overlay_lbl.pack(pady=(10, 0))
@@ -2691,11 +2730,11 @@ class TorMonitorApp:
         ov.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overlay = ov
 
-        small   = self._font(["Segoe UI","Arial"], 9)
-        ui_btn  = self._font(["Segoe UI","Arial"], 11)
-        ui_desc = self._font(["Segoe UI","Arial"],  8)
-        ui_sub  = self._font(["Segoe UI","Arial"],  9)
-        ui_ttl  = self._font(["Segoe UI","Arial"], 15, bold=True)
+        small   = self._font(["Segoe UI","Arial"], self._sf(9))
+        ui_btn  = self._font(["Segoe UI","Arial"], self._sf(11))
+        ui_desc = self._font(["Segoe UI","Arial"], self._sf(8))
+        ui_sub  = self._font(["Segoe UI","Arial"], self._sf(9))
+        ui_ttl  = self._font(["Segoe UI","Arial"], self._sf(15), bold=True)
 
         ov.grid_rowconfigure(0, weight=1)
         ov.grid_rowconfigure(2, weight=1)
@@ -2705,17 +2744,18 @@ class TorMonitorApp:
         col = tk.Frame(ov, bg=self.BG)
         col.grid(row=1, column=1)
 
-        tk.Label(col, text="⬡", font=("Segoe UI", 40),
+        tk.Label(col, text="⬡", font=("Segoe UI", self._sf(40)),
                  fg=self.ACCENT, bg=self.BG).pack(pady=(0, 4))
         tk.Label(col, text="TOR NYX MONITOR",
                  font=ui_ttl, fg=self.TEXT, bg=self.BG).pack(pady=(2, 0))
 
-        rule = tk.Canvas(col, height=3, width=300,
+        _rw = self._s(300)
+        rule = tk.Canvas(col, height=3, width=_rw,
                           bg=self.BG, highlightthickness=0)
         rule.pack(pady=(10, 20))
-        rule.create_line(0,   1, 300, 1, fill=self.BORDER, width=1)
-        rule.create_line(80,  1, 220, 1, fill=self.ACCENT, width=2)
-        rule.create_line(130, 1, 170, 1, fill="#c4b5fd",   width=2)
+        rule.create_line(0,           1, _rw,          1, fill=self.BORDER, width=1)
+        rule.create_line(_rw*80//300, 1, _rw*220//300, 1, fill=self.ACCENT, width=2)
+        rule.create_line(_rw*130//300,1, _rw*170//300, 1, fill="#c4b5fd",   width=2)
 
         options = [
             ("⬡  Connect Nyx",
@@ -2883,8 +2923,8 @@ class TorMonitorApp:
                                                          self.root.winfo_pointerx(),
                                                          self.root.winfo_pointery()) else None))
 
-        small     = self._font(["Segoe UI","Arial"], 9)
-        small_dim = self._font(["Segoe UI","Arial"], 8)
+        small     = self._font(["Segoe UI","Arial"], self._sf(9))
+        small_dim = self._font(["Segoe UI","Arial"], self._sf(8))
 
         for label, subtitle in self._GRAPH_MODES:
             mode_name = label.split("  ", 1)[-1]   # "Bandwidth" / "Connections" / "Resources"
@@ -2958,8 +2998,8 @@ class TorMonitorApp:
                 pass
         menu.bind("<FocusOut>", _dismiss)
 
-        small = self._font(["Segoe UI","Arial"], 9)
-        mono  = self._font(["Cascadia Code","Consolas","Courier New"], 9)
+        small = self._font(["Segoe UI","Arial"], self._sf(9))
+        mono  = self._font(["Cascadia Code","Consolas","Courier New"], self._sf(9))
 
         for label, cmd, confirm in self._NYX_ACTIONS:
             if cmd is None:

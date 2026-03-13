@@ -1,11 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile tor_bridge_monitor_v2.py)",
-      "Bash(python -m flake8 tor_bridge_monitor_v2.py --select=E,W,F)",
-      "Bash(python -m pylint tor_bridge_monitor_v2.py --errors-only)",
-      "Bash(python -m pyflakes tor_bridge_monitor_v2.py)",
-      "Bash(python -c \"import py_compile; py_compile.compile\\(''tor_bridge_monitor_v2.py'', doraise=True\\)\")",
+      "Bash(python -m py_compile tor_bridge_monitor.py)",
+      "Bash(python -m flake8 tor_bridge_monitor.py --select=E,W,F)",
+      "Bash(python -m pylint tor_bridge_monitor.py --errors-only)",
+      "Bash(python -m pyflakes tor_bridge_monitor.py)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''tor_bridge_monitor.py'', doraise=True\\)\")",
       "Bash(python -W all -c \":*)",
       "Bash(npx pyright:*)"
     ]

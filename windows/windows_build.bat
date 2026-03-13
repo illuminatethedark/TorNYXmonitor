@@ -7,10 +7,13 @@ echo  Tor NYX Monitor v0.2.1 - EXE Builder
 echo ================================================
 echo.
 
+:: ── Resolve root project directory (one level up from windows\) ───────
+set "ROOT_DIR=%~dp0.."
+
 :: ── Verify source file exists ────────────────────────────────────────
-if not exist "%~dp0tor_bridge_monitor_v2.py" (
-    echo  ERROR: tor_bridge_monitor_v2.py not found in %~dp0
-    echo  Place build_v2.bat in the same folder as the script.
+if not exist "%ROOT_DIR%\tor_bridge_monitor.py" (
+    echo  ERROR: tor_bridge_monitor.py not found at %ROOT_DIR%
+    echo  Place windows_build.bat inside a 'windows' subfolder of the project.
     pause & exit /b 1
 )
 
@@ -60,12 +63,12 @@ echo        OK.
 
 :: ── Resolve icon ──────────────────────────────────────────────────────
 set "ICON_ARG="
-if exist "%~dp0icon.ico" (
-    set "ICON_ARG=--icon=%~dp0icon.ico"
-    echo  Using icon: %~dp0icon.ico
+if exist "%ROOT_DIR%\icon.ico" (
+    set "ICON_ARG=--icon=%ROOT_DIR%\icon.ico"
+    echo  Using icon: %ROOT_DIR%\icon.ico
 )
 
-:: ── Build the exe ─────────────────────────────────────────────────────
+:: ── Build the exe (output goes to root dist\ and build\) ──────────────
 echo.
 echo [3/4] Building executable...
 echo        This may take a minute...
@@ -74,8 +77,11 @@ echo.
     --onefile ^
     --windowed ^
     --name "Tor NYX Monitor v0.2.1" ^
+    --distpath "%ROOT_DIR%\dist" ^
+    --workpath "%ROOT_DIR%\build" ^
+    --specpath "%ROOT_DIR%" ^
     !ICON_ARG! ^
-    --add-data "%~dp0icon.ico;." ^
+    --add-data "%ROOT_DIR%\icon.ico;." ^
     --hidden-import paramiko ^
     --hidden-import paramiko.transport ^
     --hidden-import paramiko.auth_handler ^
@@ -111,7 +117,7 @@ echo.
     --hidden-import nacl.signing ^
     --clean ^
     --noconfirm ^
-    "%~dp0tor_bridge_monitor_v2.py"
+    "%ROOT_DIR%\tor_bridge_monitor.py"
 
 if errorlevel 1 (
     echo.
@@ -123,9 +129,9 @@ if errorlevel 1 (
 :: ── Verify output ─────────────────────────────────────────────────────
 echo.
 echo [4/4] Verifying output...
-if exist "%~dp0dist\Tor NYX Monitor v0.2.1.exe" (
+if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.1.exe" (
     echo        SUCCESS: dist\Tor NYX Monitor v0.2.1.exe created.
-    for %%i in ("%~dp0dist\Tor NYX Monitor v0.2.1.exe") do echo        Size: %%~zi bytes
+    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.1.exe") do echo        Size: %%~zi bytes
 ) else (
     echo  ERROR: exe not found in dist\ folder.
     pause & exit /b 1
@@ -134,8 +140,8 @@ if exist "%~dp0dist\Tor NYX Monitor v0.2.1.exe" (
 :: ── Clean up build artefacts ──────────────────────────────────────────
 echo.
 echo        Cleaning up build files...
-if exist "%~dp0build"                          rmdir /s /q "%~dp0build"
-if exist "%~dp0Tor NYX Monitor v0.2.1.spec"  del /q "%~dp0Tor NYX Monitor v0.2.1.spec"
+if exist "%ROOT_DIR%\build"                         rmdir /s /q "%ROOT_DIR%\build"
+if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.1.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.1.spec"
 echo        Done.
 
 echo.
