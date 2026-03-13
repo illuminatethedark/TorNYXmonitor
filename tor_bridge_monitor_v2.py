@@ -1,13 +1,15 @@
 """
-Tor NYX Monitor v2  —  Windows 11
+Tor NYX Monitor v0.2.1
 ======================================
-Clean rewrite.  Two worker threads (SSH + Tor control port) post events
-onto a single queue.  The main tkinter thread drains that queue every 50 ms
-and updates the UI.  No shared state survives a disconnect.
+Two worker threads (SSH + Tor control port) post events onto a single queue.
+The main tkinter thread drains that queue every 50 ms and updates the UI.
+No shared state survives a disconnect.
 
 Requirements:
     pip install paramiko pyte
 """
+
+__version__ = "0.2.1"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Standard library
@@ -115,8 +117,11 @@ def save_config(cfg: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 #  TOFU SSH host-key policy
 # ─────────────────────────────────────────────────────────────────────────────
-class _TOFUPolicy(paramiko.MissingHostKeyPolicy if HAS_PARAMIKO
-                  else object):
+_TOFUBase: type = object
+if HAS_PARAMIKO:
+    _TOFUBase = paramiko.MissingHostKeyPolicy
+
+class _TOFUPolicy(_TOFUBase):
     """Trust-on-first-use: save unknown keys; reject changed keys."""
     def __init__(self, path: str):
         self._path = path
@@ -180,11 +185,12 @@ def resolve_color(color, is_fg: bool) -> str:
 #  Formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def fmt_bytes(n: int) -> str:
+    v: float = n
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
+        if v < 1024:
+            return f"{v:.0f} {unit}" if unit == "B" else f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} TB"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,8 +217,8 @@ class SSHWorker(threading.Thread):
         self._channel = None
 
         if HAS_PYTE:
-            self.screen      = pyte.Screen(cols, rows)
-            self.stream      = pyte.ByteStream(self.screen)
+            self.screen      = pyte.Screen(cols, rows)       # type: ignore[possibly-undefined]
+            self.stream      = pyte.ByteStream(self.screen)  # type: ignore[possibly-undefined]
             self.screen_lock = threading.Lock()
         else:
             self.screen = self.stream = self.screen_lock = None
@@ -1263,6 +1269,7 @@ class DashboardPanel(tk.Frame):
         id_row("Fingerprint", "_id_fp",     font=self._ffp)
         id_row("OR Port",     "_id_port")
         id_row("Tor version", "_id_ver")
+        id_row("Uptime",      "_id_uptime")
         id_row("Flags",       "_id_flags")
         id_row("BW rate",     "_id_bwrate")
 
@@ -1664,6 +1671,16 @@ class DashboardPanel(tk.Frame):
         else:
             self._id_fp.config(text="—")
 
+        secs = d.get("uptime")
+        if isinstance(secs, int):
+            d_  = secs // 86400
+            h_  = (secs % 86400) // 3600
+            m_  = (secs % 3600)  // 60
+            sl(self._id_uptime,
+               f"{d_}d {h_}h {m_}m" if d_ else f"{h_}h {m_}m")
+        else:
+            sl(self._id_uptime, "—")
+
         bwr  = d.get("bandwidthrate",  "")
         bwb  = d.get("bandwidthburst", "")
         try:
@@ -1753,9 +1770,10 @@ class TorMonitorApp:
         self._spin_lbl    = None
         self._overlay_lbl = None
         self._log_height  = 160
+        self._last_poll_time = time.time()   # for sleep-wake detection
 
         _log.info("=" * 60)
-        _log.info("Tor NYX Monitor v2 starting — log: %s", LOG_FILE)
+        _log.info("Tor NYX Monitor v%s starting — log: %s", __version__, LOG_FILE)
 
         self._build_ui()
         self._poll()
@@ -1774,7 +1792,7 @@ class TorMonitorApp:
         return ("Courier New", size, "bold" if bold else "normal")
 
     def _build_ui(self):
-        self.root.title("Tor NYX Monitor")
+        self.root.title(f"Tor NYX Monitor  v{__version__}")
 
         # Load window icon — works both when running as a script and as a
         # PyInstaller --onefile exe (where _MEIPASS holds extracted resources).
@@ -2085,6 +2103,15 @@ class TorMonitorApp:
     def _poll(self):
         if self._closing:
             return
+
+        now = time.time()
+        gap = now - self._last_poll_time
+        self._last_poll_time = now
+        # A gap much larger than the 50 ms schedule means the system was
+        # suspended.  5 s is conservative — normal jitter is < 500 ms.
+        if gap > 5.0 and (self._ssh or self._ctrl or self._ssh_retry_cfg):
+            self._on_wake_from_sleep()
+
         try:
             for _ in range(32):   # drain up to 32 messages per tick
                 msg = self._eq.get_nowait()
@@ -2240,6 +2267,45 @@ class TorMonitorApp:
                     pass
         self._ssh  = None
         self._ctrl = None
+
+    def _on_wake_from_sleep(self):
+        """Called when the poll-gap detector identifies a system resume.
+
+        SSH sockets are always dead after sleep.  Kill the stale workers,
+        bump the session counter so their queued events are discarded, then
+        schedule a fresh SSH reconnect after a short delay to let the NIC
+        re-establish before we attempt to connect.
+        """
+        _log.info("Wake from sleep detected (poll gap > 5 s) — reconnecting")
+        self._ui_log("System resumed from sleep — reconnecting…", "warn")
+        self._set_status("connecting", "Resumed from sleep — reconnecting…")
+
+        # Cancel any in-flight retry timers from the previous session.
+        for attr in ("_ctrl_retry_id", "_ssh_retry_id"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        cfg  = self._ssh_retry_cfg   # preserve before _stop_workers clears it
+        mode = self._ssh_retry_mode
+
+        self._session += 1           # discard all queued events from dead workers
+        self._stop_workers()
+
+        if cfg:
+            # Restore retry context so _retry_ssh knows what to connect to.
+            self._ssh_retry_cfg   = cfg
+            self._ssh_retry_mode  = mode
+            self._ssh_retry_count = 0
+            self._ctrl_retry_count = 0
+            # Wait 4 s for the NIC to come back before attempting SSH.
+            self._ssh_retry_id = self.root.after(4000, self._retry_ssh)
+        else:
+            self._on_disconnected()
 
     def _connect(self, mode: str = "nyx"):
         cfg = self._cfg_from_ui()
@@ -2880,7 +2946,11 @@ class TorMonitorApp:
         btn = self._actions_btn
         menu.geometry(f"+{btn.winfo_rootx()}+{btn.winfo_rooty()+btn.winfo_height()+2}")
 
+        _selected = [False]
+
         def _dismiss(e=None):
+            if _selected[0]:
+                return
             try:
                 self._actions_btn.focus_set()
                 menu.after(0, menu.destroy)
@@ -2911,10 +2981,9 @@ class TorMonitorApp:
             def _run(c=cmd, conf=confirm, m=menu):
                 _selected[0] = True
                 try:
-                    self.root.unbind("<Button-1>", _dismiss_id[0])
+                    m.destroy()
                 except Exception:
                     pass
-                m.destroy()
                 if conf:
                     if not messagebox.askyesno("Confirm", conf):
                         return
@@ -3102,10 +3171,12 @@ def main():
     try:
         root.update()
         if _ctypes:
-            _ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                root.winfo_id(), 20,
-                _ctypes.byref(_ctypes.c_int(1)),
-                _ctypes.sizeof(_ctypes.c_int))
+            hwnd = _ctypes.windll.user32.GetParent(root.winfo_id())
+            for attr in (20, 19):   # 20 = Win10 1903+/Win11, 19 = older Win10
+                _ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr,
+                    _ctypes.byref(_ctypes.c_int(1)),
+                    _ctypes.sizeof(_ctypes.c_int))
     except Exception:
         pass
 

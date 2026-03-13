@@ -1,9 +1,9 @@
 @echo off
-title Tor NYX Monitor - Build EXE
+title Tor NYX Monitor v0.2.1 - Build EXE
 setlocal enabledelayedexpansion
 
 echo ================================================
-echo  Tor NYX Monitor - EXE Builder
+echo  Tor NYX Monitor v0.2.1 - EXE Builder
 echo ================================================
 echo.
 
@@ -73,7 +73,7 @@ echo.
 "!PYTHON_EXE!" -m PyInstaller ^
     --onefile ^
     --windowed ^
-    --name "Tor NYX Monitor" ^
+    --name "Tor NYX Monitor v0.2.1" ^
     !ICON_ARG! ^
     --add-data "%~dp0icon.ico;." ^
     --hidden-import paramiko ^
@@ -123,9 +123,9 @@ if errorlevel 1 (
 :: ── Verify output ─────────────────────────────────────────────────────
 echo.
 echo [4/4] Verifying output...
-if exist "%~dp0dist\Tor NYX Monitor.exe" (
-    echo        SUCCESS: dist\Tor NYX Monitor.exe created.
-    for %%i in ("%~dp0dist\Tor NYX Monitor.exe") do echo        Size: %%~zi bytes
+if exist "%~dp0dist\Tor NYX Monitor v0.2.1.exe" (
+    echo        SUCCESS: dist\Tor NYX Monitor v0.2.1.exe created.
+    for %%i in ("%~dp0dist\Tor NYX Monitor v0.2.1.exe") do echo        Size: %%~zi bytes
 ) else (
     echo  ERROR: exe not found in dist\ folder.
     pause & exit /b 1
@@ -134,14 +134,14 @@ if exist "%~dp0dist\Tor NYX Monitor.exe" (
 :: ── Clean up build artefacts ──────────────────────────────────────────
 echo.
 echo        Cleaning up build files...
-if exist "%~dp0build"                  rmdir /s /q "%~dp0build"
-if exist "%~dp0Tor NYX Monitor.spec"  del /q "%~dp0Tor NYX Monitor.spec"
+if exist "%~dp0build"                          rmdir /s /q "%~dp0build"
+if exist "%~dp0Tor NYX Monitor v0.2.1.spec"  del /q "%~dp0Tor NYX Monitor v0.2.1.spec"
 echo        Done.
 
 echo.
 echo ================================================
 echo  Build complete!
-echo  Your exe is at:  dist\Tor NYX Monitor.exe
+echo  Your exe is at:  dist\Tor NYX Monitor v0.2.1.exe
 echo.
 echo  NOTE: Windows SmartScreen may warn on first run
 echo  because the exe is unsigned. Click "More info"
