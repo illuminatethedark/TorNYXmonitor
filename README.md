@@ -1,6 +1,7 @@
 # Tor NYX Monitor
 
-An elegant Windows desktop application for monitoring a remote Tor relay over SSH.
+A desktop application for monitoring a remote Tor relay over SSH.
+Runs on **Windows, Linux, and macOS**.
 Connects to a Raspberry Pi (or any Linux host) running Tor, launches **nyx**
 inside a PTY, streams the terminal to a canvas widget, and exposes a live
 dashboard fed by the Tor control port.
@@ -21,9 +22,15 @@ dashboard fed by the Tor control port.
 
 ## Requirements
 
-### Windows host
+### Host machine (Windows, Linux, or macOS)
 - Python 3.9+
 - `pip install paramiko pyte`
+- **Linux only:** tkinter is not always bundled with Python — install it via your package manager if needed:
+  ```
+  sudo apt install python3-tk      # Debian/Ubuntu
+  sudo dnf install python3-tkinter # Fedora
+  brew install python-tk           # macOS (Homebrew)
+  ```
 
 ### Raspberry Pi (or remote host)
 ```
@@ -51,6 +58,23 @@ python tor_bridge_monitor_v2.py
 build_v2.bat
 ```
 Produces `dist\Tor NYX Monitor.exe` (~17 MB, single file).
+
+> **Linux/macOS:** `build_v2.bat` is Windows-only. You can build a native binary with PyInstaller directly:
+> ```
+> pip install pyinstaller
+> pyinstaller --onefile tor_bridge_monitor_v2.py
+> ```
+
+## Cross-platform notes
+
+The app runs on Windows, Linux, and macOS. All core functionality is platform-neutral. The only OS-specific code is a Windows DWM call that enables dark title bar styling — it is silently skipped on Linux and macOS with no effect on functionality.
+
+| Feature | Windows | Linux | macOS |
+|---------|---------|-------|-------|
+| Core monitoring & SSH | ✓ | ✓ | ✓ |
+| Tor control port dashboard | ✓ | ✓ | ✓ |
+| Dark title bar | ✓ | — | — |
+| `.exe` build via `build_v2.bat` | ✓ | — | — |
 
 ## Config & logs
 
