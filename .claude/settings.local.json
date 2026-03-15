@@ -7,7 +7,10 @@
       "Bash(python -m pyflakes tor_bridge_monitor.py)",
       "Bash(python -c \"import py_compile; py_compile.compile\\(''tor_bridge_monitor.py'', doraise=True\\)\")",
       "Bash(python -W all -c \":*)",
-      "Bash(npx pyright:*)"
+      "Bash(npx pyright:*)",
+      "Bash(grep -v \"^\\\\s*//\")",
+      "Bash(cp \"tor_bridge_monitor \\(# Name clash 2026-03-15 u92qgpC #\\).py\" tor_bridge_monitor.py)",
+      "Bash(rm \"tor_bridge_monitor \\(# Name clash 2026-03-15 u92qgpC #\\).py\")"
     ]
   }
 }
