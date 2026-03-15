@@ -14,8 +14,9 @@ Requirements:
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
+import base64
 import collections
 import datetime
 import json
@@ -52,6 +53,14 @@ try:
 except ImportError:
     HAS_PYTE = False
 
+try:
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes as _crypto_hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Paths
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +68,7 @@ _HOME            = os.path.expanduser("~")
 CONFIG_FILE      = os.path.join(_HOME, ".tor_bridge_monitor.json")
 KNOWN_HOSTS_FILE = os.path.join(_HOME, ".tor_bridge_monitor_known_hosts")
 LOG_FILE         = os.path.join(_HOME, ".tor_bridge_monitor.log")
+PROFILES_FILE    = os.path.join(_HOME, ".tor_bridge_monitor_profiles.json")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  File logger  (always-on, rotates at 2 MB, keeps 3 backups)
@@ -134,6 +144,227 @@ def save_config(cfg: dict):
         os.replace(tmp, CONFIG_FILE)
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Connection profiles — data layer
+# ─────────────────────────────────────────────────────────────────────────────
+def load_profiles() -> dict:
+    """Return the raw profiles file dict — may be plaintext or encrypted wrapper."""
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if data.get("encrypted") or isinstance(data.get("profiles"), dict):
+                return data
+        except Exception:
+            pass
+    return {"version": 1, "encrypted": False, "profiles": {}, "last": ""}
+
+
+def save_profiles(data: dict):
+    """Atomically write the profiles file."""
+    try:
+        tmp = PROFILES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, PROFILES_FILE)
+    except Exception as exc:
+        _log.error("save_profiles failed: %s", exc)
+
+
+_PBKDF2_ITERS = 480_000
+
+def _profiles_derive_key(password: str, salt: bytes) -> bytes:
+    """Derive a 32-byte AES key from password + salt using PBKDF2-HMAC-SHA256."""
+    kdf = PBKDF2HMAC(algorithm=_crypto_hashes.SHA256(),
+                     length=32, salt=salt, iterations=_PBKDF2_ITERS)
+    return kdf.derive(password.encode("utf-8"))
+
+
+def _profiles_encrypt(inner: dict, key: bytes, salt: bytes) -> dict:
+    """Encrypt the inner profiles dict. Returns the outer wrapper suitable for save_profiles()."""
+    nonce = os.urandom(12)
+    ct    = AESGCM(key).encrypt(nonce, json.dumps(inner).encode("utf-8"), None)
+    return {
+        "version":    1,
+        "encrypted":  True,
+        "salt":       base64.b64encode(salt).decode(),
+        "nonce":      base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(ct).decode(),
+    }
+
+
+def _profiles_decrypt(outer: dict, key: bytes) -> dict | None:
+    """Decrypt and return the inner dict, or None on auth failure."""
+    try:
+        nonce = base64.b64decode(outer["nonce"])
+        ct    = base64.b64decode(outer["ciphertext"])
+        pt    = AESGCM(key).decrypt(nonce, ct, None)
+        return json.loads(pt.decode("utf-8"))
+    except Exception:
+        return None
+
+
+class SecureCredStore:
+    """Stores connection-profile passwords in the OS credential manager.
+
+    Priority:
+      1. ``keyring``  (pip install keyring) — Windows Credential Manager,
+                       macOS Keychain, or Linux SecretService / GNOME Keyring.
+      2. Windows DPAPI via ctypes — no extra dependency; data is bound to the
+                       current Windows user account and machine.
+      3. Plaintext inside the profiles JSON file + a log warning.
+
+    Passwords are kept *outside* the profiles JSON file whenever a secure
+    backend is available.  For DPAPI the encrypted blob is embedded in the
+    profile entry so the file remains self-contained.
+    """
+
+    _SERVICE = "TorNYXMonitor"
+    _cached_backend: str = ""
+
+    # ── backend detection ─────────────────────────────────────────────────
+    @classmethod
+    def _detect_backend(cls) -> str:
+        if cls._cached_backend:
+            return cls._cached_backend
+        # 1. keyring
+        try:
+            import keyring as _kr   # type: ignore[import-not-found]
+            _kr.get_password(cls._SERVICE, "__probe__")
+            cls._cached_backend = "keyring"
+            _log.info("SecureCredStore: using keyring backend")
+            return cls._cached_backend
+        except Exception:
+            pass
+        # 2. DPAPI (Windows)
+        try:
+            if cls._dpapi_protect("probe") is not None:
+                cls._cached_backend = "dpapi"
+                _log.info("SecureCredStore: using Windows DPAPI backend")
+                return cls._cached_backend
+        except Exception:
+            pass
+        # 3. Plaintext fallback
+        _log.warning(
+            "SecureCredStore: no secure credential store found — "
+            "passwords will be stored in plaintext in %s", PROFILES_FILE)
+        cls._cached_backend = "plain"
+        return cls._cached_backend
+
+    # ── Windows DPAPI ─────────────────────────────────────────────────────
+    @classmethod
+    def _dpapi_protect(cls, plaintext: str) -> str | None:
+        """Encrypt *plaintext* with DPAPI; return base64 str or None."""
+        try:
+            import ctypes as _c
+            import ctypes.wintypes as _w
+
+            class _BLOB(_c.Structure):
+                _fields_ = [("cbData", _w.DWORD),
+                             ("pbData", _c.POINTER(_c.c_char))]
+
+            data  = plaintext.encode("utf-8")
+            buf   = (_c.c_char * len(data))(*data)
+            b_in  = _BLOB(len(data), buf)
+            b_out = _BLOB()
+            ok = _c.windll.crypt32.CryptProtectData(
+                _c.byref(b_in), None, None, None, None, 0, _c.byref(b_out))
+            if not ok:
+                return None
+            raw = bytes(_c.string_at(b_out.pbData, b_out.cbData))
+            _c.windll.kernel32.LocalFree(b_out.pbData)
+            return base64.b64encode(raw).decode("ascii")
+        except Exception:
+            return None
+
+    @classmethod
+    def _dpapi_unprotect(cls, b64: str) -> str | None:
+        """Decrypt a DPAPI base64 blob; return plaintext or None."""
+        try:
+            import ctypes as _c
+            import ctypes.wintypes as _w
+
+            class _BLOB(_c.Structure):
+                _fields_ = [("cbData", _w.DWORD),
+                             ("pbData", _c.POINTER(_c.c_char))]
+
+            data  = base64.b64decode(b64)
+            buf   = (_c.c_char * len(data))(*data)
+            b_in  = _BLOB(len(data), buf)
+            b_out = _BLOB()
+            ok = _c.windll.crypt32.CryptUnprotectData(
+                _c.byref(b_in), None, None, None, None, 0, _c.byref(b_out))
+            if not ok:
+                return None
+            raw = _c.string_at(b_out.pbData, b_out.cbData)
+            _c.windll.kernel32.LocalFree(b_out.pbData)
+            return raw.decode("utf-8")
+        except Exception:
+            return None
+
+    # ── public API ────────────────────────────────────────────────────────
+    @classmethod
+    def store(cls, profile_name: str, password: str) -> dict:
+        """Persist *password* for *profile_name*.
+
+        Returns a metadata dict that must be merged into the profile entry
+        before the caller calls ``save_profiles()``.
+        """
+        if not password:
+            return {"_pwd_backend": "none"}
+
+        backend = cls._detect_backend()
+
+        if backend == "keyring":
+            try:
+                import keyring as _kr   # type: ignore[import-not-found]
+                _kr.set_password(cls._SERVICE, profile_name, password)
+                return {"_pwd_backend": "keyring"}
+            except Exception as exc:
+                _log.warning("keyring store failed (%s) — falling back", exc)
+                backend = "dpapi"
+
+        if backend == "dpapi":
+            enc = cls._dpapi_protect(password)
+            if enc:
+                return {"_pwd_backend": "dpapi", "_pwd_enc": enc}
+            backend = "plain"
+
+        _log.warning("Storing password in plaintext for profile '%s'",
+                     profile_name)
+        return {"_pwd_backend": "plain", "_pwd_plain": password}
+
+    @classmethod
+    def load(cls, profile: dict, profile_name: str) -> str:
+        """Retrieve the password for *profile_name*.
+
+        *profile* is the dict stored under that name in the profiles file.
+        """
+        backend = profile.get("_pwd_backend", "none")
+        if backend == "keyring":
+            try:
+                import keyring as _kr   # type: ignore[import-not-found]
+                return _kr.get_password(cls._SERVICE, profile_name) or ""
+            except Exception:
+                return ""
+        if backend == "dpapi":
+            enc = profile.get("_pwd_enc", "")
+            return cls._dpapi_unprotect(enc) or "" if enc else ""
+        if backend == "plain":
+            return profile.get("_pwd_plain", "")
+        return ""
+
+    @classmethod
+    def delete(cls, profile: dict, profile_name: str):
+        """Remove any OS-side credential for *profile_name*."""
+        if profile.get("_pwd_backend") == "keyring":
+            try:
+                import keyring as _kr   # type: ignore[import-not-found]
+                _kr.delete_password(cls._SERVICE, profile_name)
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1164,7 +1395,9 @@ class DashboardPanel(tk.Frame):
 
     def __init__(self, parent, scale: float = 1.0, **kw):
         super().__init__(parent, bg=self.BG, **kw)
-        self._scale = scale
+        self._scale       = scale
+        self._lower_drag_y = None
+        self._lower_drag_h = None
         # Bandwidth history
         self._bw_read    = collections.deque([0] * self.HISTORY_LEN,
                                               maxlen=self.HISTORY_LEN)
@@ -1190,6 +1423,7 @@ class DashboardPanel(tk.Frame):
         self._circ_failed = 0
         self._last_conns     = []
         self._conn_sig_last  = None    # fingerprint of last rendered conn list
+        self._conn_sort      = "direction"  # active sort: direction|status|name|none
         self._graph_mode  = "Bandwidth"   # "Bandwidth" | "Connections" | "Resources"
         self._build()
 
@@ -1229,6 +1463,7 @@ class DashboardPanel(tk.Frame):
         self.rowconfigure(2, weight=0)
         self.rowconfigure(3, weight=0)
         self.rowconfigure(4, weight=1, minsize=self._s(80))
+        self.rowconfigure(5, weight=0)
         self.columnconfigure(0, weight=1)
 
         # ── bandwidth section ─────────────────────────────────────────────
@@ -1261,10 +1496,12 @@ class DashboardPanel(tk.Frame):
         tk.Frame(self, bg=self.BORDER, height=1).grid(row=1, column=0, sticky="ew", padx=20, pady=(16, 0))
 
         # ── two-column middle section (identity + connections) ────────────
-        lower = tk.Frame(self, bg=self.BG, height=self._s(200))
+        # height=240: large enough for all 8 relay-identity rows at scale=1.0
+        lower = tk.Frame(self, bg=self.BG, height=self._s(240))
         lower.grid(row=2, column=0, sticky="ew", padx=20, pady=(14, 0))
         lower.pack_propagate(False)
         lower.grid_propagate(False)
+        self._lower = lower   # referenced by the top drag handle
         lower.columnconfigure(0, weight=3)
         lower.columnconfigure(1, weight=0)
         lower.columnconfigure(2, weight=2)
@@ -1317,6 +1554,15 @@ class DashboardPanel(tk.Frame):
         self._conn_count = tk.Label(conn_hdr, text="", font=self._fmono_s,
                                      fg=self.TEXT_DIM, bg=self.BG)
         self._conn_count.pack(side="right")
+        _sort_labels = {"direction": "↕ Direction", "status": "↕ Status",
+                        "name": "↕ Name", "none": "↕ Default"}
+        self._conn_sort_btn = tk.Button(
+            conn_hdr, text=_sort_labels[self._conn_sort],
+            font=self._fui_s, fg=self.TEXT_DIM, bg=self.BG,
+            relief="flat", bd=0, cursor="hand2",
+            activeforeground=self.ACCENT, activebackground=self.BG,
+            command=self._cycle_conn_sort)
+        self._conn_sort_btn.pack(side="right", padx=(0, 8))
 
         col_hdr = tk.Frame(conn_outer, bg=self.PANEL)
         col_hdr.pack(fill="x")
@@ -1357,12 +1603,30 @@ class DashboardPanel(tk.Frame):
 
         self._conn_rows = []
 
-        # ── full-width events section ────────────────────────────────
-        tk.Frame(self, bg=self.BORDER, height=1).grid(
-            row=3, column=0, sticky="ew", padx=20, pady=(14, 0))
+        # ── full-width events section ─────────────────────────────────────
+        # Top drag handle: drag up/down to resize the identity section vs events
+        ev_top_handle = tk.Frame(self, bg=self.BORDER,
+                                  height=self._s(6), cursor="sb_v_double_arrow")
+        ev_top_handle.grid(row=3, column=0, sticky="ew", padx=20, pady=(10, 0))
+        ev_top_handle.bind("<Enter>",
+                           lambda _: ev_top_handle.config(bg="#2e3a50"))
+        ev_top_handle.bind("<Leave>",
+                           lambda _: ev_top_handle.config(bg=self.BORDER))
+        ev_top_handle.bind("<ButtonPress-1>",   self._ev_top_drag_start)
+        ev_top_handle.bind("<B1-Motion>",       self._ev_top_drag_move)
+        ev_top_handle.bind("<ButtonRelease-1>", self._ev_top_drag_end)
 
         ev_section = tk.Frame(self, bg=self.BG)
-        ev_section.grid(row=4, column=0, sticky="nsew", padx=20, pady=(10, 14))
+        ev_section.grid(row=4, column=0, sticky="nsew", padx=20, pady=(6, 0))
+
+        # Bottom drag handle: drag up to open/grow the debug log below
+        self._bottom_handle = tk.Frame(self, bg=self.BORDER,
+                                        height=self._s(5), cursor="sb_v_double_arrow")
+        self._bottom_handle.grid(row=5, column=0, sticky="ew")
+        self._bottom_handle.bind("<Enter>",
+                                  lambda _: self._bottom_handle.config(bg="#2e3a50"))
+        self._bottom_handle.bind("<Leave>",
+                                  lambda _: self._bottom_handle.config(bg=self.BORDER))
         ev_section.rowconfigure(1, weight=1)
         ev_section.columnconfigure(0, weight=1)
 
@@ -1399,6 +1663,27 @@ class DashboardPanel(tk.Frame):
         self._ev_text.tag_configure("addr",   foreground="#c4b5fd")
         self._ev_text.tag_configure("other",  foreground=self.TEXT)
         self._EV_MAX = 200
+
+    # ── top drag handle (identity ↔ events boundary) ─────────────────────────
+    def _ev_top_drag_start(self, event):
+        self._lower_drag_y = event.y_root
+        self._lower_drag_h = self._lower.winfo_height()
+
+    def _ev_top_drag_move(self, event):
+        if self._lower_drag_y is None:
+            return
+        delta  = event.y_root - self._lower_drag_y
+        new_h  = self._lower_drag_h + delta
+        # Clamp: at least enough to show a few rows; at most 80 % of panel height
+        panel_h = self.winfo_height()
+        min_h   = self._s(80)
+        max_h   = max(min_h, int(panel_h * 0.75)) if panel_h > 0 else self._s(400)
+        new_h   = max(min_h, min(max_h, new_h))
+        self._lower.configure(height=new_h)
+
+    def _ev_top_drag_end(self, *_):
+        self._lower_drag_y = None
+        self._lower_drag_h = None
 
     # ── scroll helpers ───────────────────────────────────────────────────────
     def _conn_scroll(self, event):
@@ -1441,17 +1726,24 @@ class DashboardPanel(tk.Frame):
         if self._graph_mode == "Bandwidth":
             self._lbl_read.config(text=f"↓  {fmt_bytes(read_b)}/s")
             self._lbl_write.config(text=f"↑  {fmt_bytes(written_b)}/s")
-            self._redraw_graph()
+        # BW events fire every second — use them to clock redraws for all
+        # graph modes so Connections and Resources stay visually live.
+        self._redraw_graph()
 
     def push_identity(self, d: dict):
         self._identity = d
         self._refresh_identity()
 
     def push_circs(self, built: int, failed: int):
+        # Store per-event deltas, not cumulative totals.  Cumulative values
+        # cause the history to fill with near-identical large numbers, making
+        # the graph appear flat regardless of circuit activity.
+        delta_b = max(0, built  - self._circ_built)
+        delta_f = max(0, failed - self._circ_failed)
         self._circ_built  = built
         self._circ_failed = failed
-        self._circ_built_hist.append(built)
-        self._circ_failed_hist.append(failed)
+        self._circ_built_hist.append(delta_b)
+        self._circ_failed_hist.append(delta_f)
         if self._graph_mode == "Resources":
             self._redraw_graph()
 
@@ -1494,7 +1786,7 @@ class DashboardPanel(tk.Frame):
             "NEW":       "#7dcfff",
         }
 
-        for i, c in enumerate(conns):
+        for i, c in enumerate(self._sorted_conns(conns)):
             bg    = self.PANEL if i % 2 == 0 else self.BG
             row_f = tk.Frame(self._conn_inner, bg=bg)
             row_f.pack(fill="x")
@@ -1537,6 +1829,37 @@ class DashboardPanel(tk.Frame):
         self._conn_canvas.yview_moveto(0)
         self._last_conns = conns
 
+    # ── connection sort ──────────────────────────────────────────────────────
+    _SORT_MODES   = ["direction", "status", "name", "none"]
+    _SORT_LABELS  = {"direction": "↕ Direction", "status": "↕ Status",
+                     "name":      "↕ Name",       "none":  "↕ Default"}
+    _STATUS_ORDER = {"CONNECTED": 0, "LAUNCHED": 1, "NEW": 2,
+                     "FAILED": 3, "CLOSED": 4}
+
+    def _sorted_conns(self, conns: list) -> list:
+        mode = self._conn_sort
+        if mode == "direction":
+            # Inbound (←) first, then outbound; ties broken by display name
+            return sorted(conns, key=lambda c: (
+                0 if c.get("direction") == "in" else 1,
+                (c.get("ip_port") or c.get("nickname") or "").lower()))
+        if mode == "status":
+            return sorted(conns, key=lambda c: (
+                self._STATUS_ORDER.get(c.get("status", ""), 5),
+                (c.get("ip_port") or c.get("nickname") or "").lower()))
+        if mode == "name":
+            return sorted(conns, key=lambda c: (
+                c.get("nickname") or c.get("ip_port") or "").lower())
+        return list(conns)  # "none" — preserve Tor's order
+
+    def _cycle_conn_sort(self):
+        idx = self._SORT_MODES.index(self._conn_sort)
+        self._conn_sort = self._SORT_MODES[(idx + 1) % len(self._SORT_MODES)]
+        self._conn_sort_btn.config(text=self._SORT_LABELS[self._conn_sort])
+        # Re-render immediately with new sort using cached data
+        self._conn_sig_last = None
+        self.push_connections(self._last_conns)
+
     def reset(self):
         """Clear all data — called on disconnect."""
         for deq in (self._bw_read, self._bw_written,
@@ -1560,6 +1883,10 @@ class DashboardPanel(tk.Frame):
             getattr(self, attr).config(text="—")
         self.push_connections([])
         self._redraw_graph()
+
+    def reset_layout(self):
+        """Restore all draggable panel sizes to their defaults."""
+        self._lower.configure(height=self._s(240))
 
     # ── graph mode control ────────────────────────────────────────────────
     def set_graph_mode(self, mode: str):
@@ -1671,11 +1998,10 @@ class DashboardPanel(tk.Frame):
                         self.ERROR,   "gray50")
         self._draw_poly(c, self._circ_built_hist,  w, h, pt, ph, ceiling,
                         self.SUCCESS, "gray50")
-        built  = self._circ_built_hist[-1]  if self._circ_built_hist  else 0
-        failed = self._circ_failed_hist[-1] if self._circ_failed_hist else 0
-        self._lbl_read.config(text=f"✓  built: {built}")
-        self._lbl_write.config(text=f"✗  failed: {failed}")
-        self._lbl_bw_max.config(text=f"↑ {int(ceiling)} peak")
+        # Labels show cumulative session totals; graph bars show per-event deltas.
+        self._lbl_read.config(text=f"✓  built: {self._circ_built}")
+        self._lbl_write.config(text=f"✗  failed: {self._circ_failed}")
+        self._lbl_bw_max.config(text=f"↑ {int(ceiling)} peak/event")
 
     # ── identity refresh ──────────────────────────────────────────────────
     def _refresh_identity(self):
@@ -1774,6 +2100,31 @@ class TorMonitorApp:
         self.cfg  = load_config()
         self._sc  = _compute_ui_scale(root)   # resolution scale factor
 
+        # Load profiles and merge last-used profile into cfg so the sidebar
+        # is pre-populated before _build_ui() runs.
+        self._profiles_data = load_profiles()
+        self._master_key  : bytes | None = None   # AES-256 key derived from master password
+        self._master_salt : bytes | None = None   # PBKDF2 salt (stored in profiles file)
+        self._profiles_locked : bool = False      # encrypted file not yet decrypted
+
+        if self._profiles_data.get("encrypted"):
+            # File is encrypted — can't pre-populate until unlocked.
+            # Store raw encrypted blob; schedule unlock prompt after UI is built.
+            self._profiles_raw_enc = self._profiles_data
+            self._profiles_data    = {"version": 1, "encrypted": False, "profiles": {}, "last": ""}
+            self._profiles_locked  = True
+        else:
+            self._profiles_raw_enc = None
+
+        _last_prof = self._profiles_data.get("last", "")
+        if not self._profiles_locked:
+            if _last_prof and _last_prof in self._profiles_data.get("profiles", {}):
+                _pd = self._profiles_data["profiles"][_last_prof]
+                for _k, _v in _pd.items():
+                    if not _k.startswith("_"):
+                        self.cfg[_k] = _v
+                self.cfg["password"] = SecureCredStore.load(_pd, _last_prof)
+
         # Worker handles — always None when not running
         self._ssh : SSHWorker  | None = None
         self._ctrl: CtrlWorker | None = None
@@ -1792,6 +2143,8 @@ class TorMonitorApp:
         self._ctrl_retry_count  = 0           # reconnect attempt counter
         self._ctrl_retry_id     = None        # pending after() id for retry
         self._ctrl_reconnecting = False       # True while a retry is in progress
+        self._ctrl_down_rounds  = 0           # consecutive ctrl_down-while-SSH-alive cycles
+        self._ctrl_update_hint  = False       # True once the "may be updates" msg is shown
         self._ssh_retry_count   = 0
         self._ssh_retry_id      = None
         self._ssh_retry_cfg     = None
@@ -1806,6 +2159,18 @@ class TorMonitorApp:
         _log.info("Tor NYX Monitor v%s starting — log: %s", __version__, LOG_FILE)
 
         self._build_ui()
+
+        # Populate profile combo now that the widget exists
+        _last_prof2 = self._profiles_data.get("last", "")
+        self._refresh_profile_combo(select=_last_prof2)
+        if _last_prof2:
+            self.profile_name_var.set(_last_prof2)
+
+        self._update_lock_btn()
+
+        if self._profiles_locked:
+            self.root.after(300, self._prompt_unlock_profiles)
+
         self._poll()
 
         if self.cfg.get("autoconnect") and self.cfg.get("host"):
@@ -1845,6 +2210,12 @@ class TorMonitorApp:
         self.root.configure(bg=self.BG)
         self.root.geometry(f"{self._s(1200)}x{self._s(780)}")
         self.root.minsize(self._s(900), self._s(680))
+
+        # Dark styling for the ttk.Combobox popup listbox
+        self.root.option_add("*TCombobox*Listbox*Background",       "#090b10")
+        self.root.option_add("*TCombobox*Listbox*Foreground",       self.TEXT)
+        self.root.option_add("*TCombobox*Listbox*selectBackground", self.ACCENT)
+        self.root.option_add("*TCombobox*Listbox*selectForeground", "white")
 
         title = self._font(["Segoe UI", "Arial"], self._sf(13), bold=True)
         label = self._font(["Segoe UI", "Arial"], self._sf(10))
@@ -1978,8 +2349,10 @@ class TorMonitorApp:
         # Log starts hidden — user opens it via the Debug Log button
 
         # ── loading overlay ───────────────────────────────────────────────────
-        self._overlay     = None
-        self._overlay_lbl = None
+        self._overlay       = None
+        self._overlay_lbl   = None
+        self._ctrl_wait_lbl = None
+        self._ctrl_wait_t0  = 0.0
 
         # Show splash on startup
         self.root.after(50, self._show_splash)
@@ -2040,11 +2413,343 @@ class TorMonitorApp:
         self.dashboard = DashboardPanel(self._view_container, scale=self._sc)
         self.dashboard.pack(fill="both", expand=True)
 
+        # Wire the dashboard's bottom handle to the log-panel resize logic
+        bh = self.dashboard._bottom_handle
+        bh.bind("<ButtonPress-1>",   self._dashboard_bottom_drag_start)
+        bh.bind("<B1-Motion>",       self._log_drag_move)
+        bh.bind("<ButtonRelease-1>", self._log_drag_end)
+
         self.term = TerminalCanvas(self._view_container, self.TERM_COLS,
                                     self.TERM_ROWS,
                                     font_name="Cascadia Code",
                                     font_size=self._sf(11))
         self.term._key_callback = self._on_term_event
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Connection profile management
+    # ─────────────────────────────────────────────────────────────────────────
+    def _refresh_profile_combo(self, select: str = ""):
+        """Rebuild the profile combobox values and optionally pre-select one."""
+        names = sorted(self._profiles_data.get("profiles", {}).keys())
+        self._profile_combo["values"] = names
+        if select and select in names:
+            self.profile_var.set(select)
+        elif names:
+            self.profile_var.set(names[0])
+        else:
+            self.profile_var.set("")
+
+    def _on_profile_select(self, *_):
+        """Load the chosen profile into the connection fields."""
+        name = self.profile_var.get()
+        if not name:
+            return
+        self.profile_name_var.set(name)
+        self._populate_from_profile(name)
+
+    def _populate_from_profile(self, name: str):
+        """Fill all sidebar connection fields from a saved profile."""
+        p = self._profiles_data.get("profiles", {}).get(name, {})
+        self.host_var.set(p.get("host", ""))
+        self.port_var.set(p.get("port", "22"))
+        self.user_var.set(p.get("user", ""))
+        self.key_var.set(p.get("key_path", ""))
+        self.autoconnect_var.set(bool(p.get("autoconnect", False)))
+        self.pass_var.set(SecureCredStore.load(p, name))
+
+    def _save_profile(self):
+        """Save the current connection fields as a named profile."""
+        name = self.profile_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Save Profile",
+                                   "Enter a name for this profile.")
+            return
+
+        profiles = self._profiles_data.setdefault("profiles", {})
+
+        # If this is the very first profile and no master key is set yet, offer encryption
+        is_first_profile = len(profiles) == 0 or (len(profiles) == 1 and name in profiles)
+        if HAS_CRYPTO and self._master_key is None and is_first_profile and not self._profiles_locked:
+            if messagebox.askyesno(
+                    "Master Password",
+                    "Protect your profiles with a master password?\n\n"
+                    "If you decline, profiles are saved without encryption "
+                    "(individual SSH passwords remain protected by the OS credential store).",
+                    icon="question"):
+                self._set_master_password_dialog()
+
+        # If the user renamed an existing profile, remove the old credential
+        old_name = self.profile_var.get()
+        if old_name and old_name != name and old_name in profiles:
+            SecureCredStore.delete(profiles[old_name], old_name)
+            del profiles[old_name]
+
+        p = {
+            "host":        self.host_var.get().strip(),
+            "port":        self.port_var.get().strip() or "22",
+            "user":        self.user_var.get().strip() or "gambit",
+            "key_path":    self.key_var.get().strip(),
+            "autoconnect": self.autoconnect_var.get(),
+        }
+        pwd_meta = SecureCredStore.store(name, self.pass_var.get())
+        p.update(pwd_meta)
+
+        profiles[name] = p
+        self._profiles_data["last"] = name
+        self._save_profiles_to_disk()
+
+        self._refresh_profile_combo(select=name)
+        backend = pwd_meta.get("_pwd_backend", "none")
+        self._ui_log(f"Profile '{name}' saved  ·  credential store: {backend}",
+                     "ok")
+
+    def _delete_profile(self):
+        """Delete the currently selected profile after confirmation."""
+        name = self.profile_var.get()
+        if not name:
+            return
+        profiles = self._profiles_data.get("profiles", {})
+        if name not in profiles:
+            return
+        if not messagebox.askyesno(
+                "Delete Profile",
+                f"Delete profile '{name}'?\n\nThis cannot be undone.",
+                icon="warning"):
+            return
+        SecureCredStore.delete(profiles[name], name)
+        del profiles[name]
+        remaining = list(profiles.keys())
+        new_last   = remaining[0] if remaining else ""
+        self._profiles_data["last"] = new_last
+        self._save_profiles_to_disk()
+        self._refresh_profile_combo(select=new_last)
+        self.profile_name_var.set(new_last)
+        self._ui_log(f"Profile '{name}' deleted", "warn")
+
+    def _save_profiles_to_disk(self):
+        """Write profiles to disk, encrypting if a master key is set."""
+        inner = {
+            "version":  self._profiles_data.get("version", 1),
+            "profiles": self._profiles_data.get("profiles", {}),
+            "last":     self._profiles_data.get("last", ""),
+        }
+        if self._master_key and self._master_salt and HAS_CRYPTO:
+            outer = _profiles_encrypt(inner, self._master_key, self._master_salt)
+        else:
+            outer = {"encrypted": False, **inner}
+        save_profiles(outer)
+
+    def _update_lock_btn(self):
+        if not hasattr(self, "_lock_btn"):
+            return
+        if not HAS_CRYPTO:
+            self._lock_btn.config(text="🔒 (no cryptography pkg)", state="disabled")
+        elif self._master_key:
+            self._lock_btn.config(text="🔒 Change Password",
+                                  fg=self.ACCENT, state="normal")
+        else:
+            self._lock_btn.config(text="🔓 Set Password",
+                                  fg=self.TEXT_DIM, state="normal")
+
+    def _on_lock_btn(self):
+        if not HAS_CRYPTO:
+            messagebox.showwarning("Master Password",
+                "The 'cryptography' package is not installed.\n"
+                "Run:  pip install cryptography")
+            return
+        self._set_master_password_dialog()
+
+    def _ask_master_password(self, title: str = "Master Password",
+                             prompt: str = "Enter master password:") -> str | None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.resizable(False, False)
+        dlg.configure(bg=self.BG)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        result = [None]
+
+        tk.Label(dlg, text=prompt, bg=self.BG, fg=self.TEXT,
+                 font=self._font(["Segoe UI", "Arial"], self._sf(10)),
+                 wraplength=300).pack(padx=20, pady=(20, 6))
+
+        pw_var = tk.StringVar()
+        pw_entry = tk.Entry(dlg, textvariable=pw_var, show="•",
+                            bg="#090b10", fg=self.TEXT,
+                            insertbackground=self.TEXT,
+                            font=self._font(["Cascadia Code", "Consolas", "Courier New"], self._sf(11)),
+                            relief="flat", bd=6, width=30)
+        pw_entry.pack(padx=20, pady=(0, 16))
+        pw_entry.focus_set()
+
+        btn_row = tk.Frame(dlg, bg=self.BG)
+        btn_row.pack(pady=(0, 16))
+
+        def _ok(*_):
+            result[0] = pw_var.get()
+            dlg.destroy()
+
+        def _cancel(*_):
+            dlg.destroy()
+
+        tk.Button(btn_row, text="Cancel", bg=self.BORDER, fg=self.TEXT_DIM,
+                  bd=0, padx=12, pady=4, cursor="hand2",
+                  command=_cancel).pack(side="left", padx=6)
+        tk.Button(btn_row, text="Unlock", bg=self.ACCENT, fg="white",
+                  bd=0, padx=12, pady=4, cursor="hand2",
+                  command=_ok).pack(side="left", padx=6)
+
+        pw_entry.bind("<Return>", _ok)
+        dlg.bind("<Escape>", _cancel)
+
+        # Centre over main window
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()  - dlg.winfo_reqwidth())  // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+        self.root.wait_window(dlg)
+        return result[0]
+
+    def _prompt_unlock_profiles(self):
+        if not HAS_CRYPTO:
+            self._ui_log("Profiles file is encrypted but 'cryptography' package is missing — profiles unavailable", "warn")
+            return
+
+        raw = self._profiles_raw_enc
+        if not raw:
+            return
+
+        pwd = self._ask_master_password(
+            title="Unlock Profiles",
+            prompt="Profiles are protected by a master password.\nEnter password to unlock:")
+        if pwd is None:
+            self._ui_log("Profiles locked — password not provided.", "warn")
+            self._profiles_locked = True
+            return
+
+        # Derive key and attempt decryption (PBKDF2 — brief pause is intentional)
+        try:
+            salt  = base64.b64decode(raw["salt"])
+            key   = _profiles_derive_key(pwd, salt)
+            inner = _profiles_decrypt(raw, key)
+        except Exception as exc:
+            messagebox.showerror("Unlock Profiles", f"Decryption error: {exc}")
+            return
+
+        if inner is None:
+            if messagebox.askyesno("Unlock Profiles",
+                                   "Incorrect password.\nTry again?", icon="warning"):
+                self.root.after(100, self._prompt_unlock_profiles)
+            else:
+                self._ui_log("Profiles locked — incorrect password.", "warn")
+            return
+
+        self._master_key      = key
+        self._master_salt     = salt
+        self._profiles_locked = False
+        self._profiles_raw_enc = None
+        self._profiles_data   = inner
+
+        last = inner.get("last", "")
+        self._refresh_profile_combo(select=last)
+        if last:
+            self.profile_name_var.set(last)
+            self._populate_from_profile(last)
+        self._update_lock_btn()
+        self._ui_log("Profiles unlocked ✓", "ok")
+
+    def _set_master_password_dialog(self):
+        changing = self._master_key is not None
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Change Master Password" if changing else "Set Master Password")
+        dlg.resizable(False, False)
+        dlg.configure(bg=self.BG)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        fnt     = self._font(["Segoe UI", "Arial"], self._sf(10))
+        fnt_sm  = self._font(["Segoe UI", "Arial"], self._sf(9))
+        fnt_mono= self._font(["Cascadia Code", "Consolas", "Courier New"], self._sf(11))
+
+        header_text = ("Change or remove the master password that encrypts your profiles file."
+                       if changing else
+                       "Set a master password to encrypt your saved profiles.\n"
+                       "⚠  If you forget this password, your profiles cannot be recovered.")
+        tk.Label(dlg, text=header_text, bg=self.BG, fg=self.TEXT,
+                 font=fnt_sm, wraplength=340, justify="left").pack(padx=20, pady=(18, 10))
+
+        def _row(label_text):
+            f = tk.Frame(dlg, bg=self.BG)
+            f.pack(fill="x", padx=20, pady=2)
+            tk.Label(f, text=label_text, bg=self.BG, fg=self.TEXT_DIM,
+                     font=fnt_sm, width=12, anchor="w").pack(side="left")
+            v = tk.StringVar()
+            e = tk.Entry(f, textvariable=v, show="•", bg="#090b10", fg=self.TEXT,
+                         insertbackground=self.TEXT, font=fnt_mono,
+                         relief="flat", bd=4, width=24)
+            e.pack(side="left")
+            return v, e
+
+        pw1_var, pw1_ent = _row("New password:")
+        pw2_var, _       = _row("Confirm:")
+
+        note = tk.Label(dlg, text="Leave both fields blank to remove master password protection.",
+                        bg=self.BG, fg=self.TEXT_DIM, font=fnt_sm, wraplength=340)
+        note.pack(padx=20, pady=(6, 4))
+
+        status_lbl = tk.Label(dlg, text="", bg=self.BG, fg=self.WARNING, font=fnt_sm)
+        status_lbl.pack(pady=2)
+
+        btn_row = tk.Frame(dlg, bg=self.BG)
+        btn_row.pack(pady=(4, 18))
+
+        def _ok(*_):
+            p1 = pw1_var.get()
+            p2 = pw2_var.get()
+            if p1 != p2:
+                status_lbl.config(text="Passwords do not match.")
+                return
+            ok_btn.config(state="disabled", text="Working…")
+            dlg.update()
+            if p1 == "":
+                # Remove encryption
+                self._master_key  = None
+                self._master_salt = None
+            else:
+                salt = os.urandom(16)
+                key  = _profiles_derive_key(p1, salt)
+                self._master_key  = key
+                self._master_salt = salt
+            self._save_profiles_to_disk()
+            self._update_lock_btn()
+            action = "removed" if p1 == "" else ("changed" if changing else "set")
+            self._ui_log(f"Profiles master password {action}.", "ok")
+            dlg.destroy()
+
+        def _cancel(*_):
+            dlg.destroy()
+
+        tk.Button(btn_row, text="Cancel", bg=self.BORDER, fg=self.TEXT_DIM,
+                  bd=0, padx=12, pady=4, cursor="hand2",
+                  command=_cancel).pack(side="left", padx=6)
+        ok_btn = tk.Button(btn_row,
+                           text="Change Password" if changing else "Set Password",
+                           bg=self.ACCENT, fg="white",
+                           bd=0, padx=12, pady=4, cursor="hand2",
+                           command=_ok)
+        ok_btn.pack(side="left", padx=6)
+
+        pw1_ent.focus_set()
+        dlg.bind("<Escape>", _cancel)
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()  - dlg.winfo_reqwidth())  // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+        self.root.wait_window(dlg)
 
     def _build_sidebar(self, sidebar: tk.Frame, label, small, mono):
         pad = dict(padx=14, pady=3)
@@ -2073,7 +2778,61 @@ class TorMonitorApp:
             e.pack(fill="x", padx=14, pady=(0, 4))
             return e
 
-        # Connection fields
+        # ── profiles section ──────────────────────────────────────────────────
+        section("PROFILES")
+
+        # Dark style for the combobox widget itself
+        _cs = ttk.Style()
+        _cs.configure("Profile.TCombobox",
+                       fieldbackground="#090b10", background=self.BORDER,
+                       foreground=self.TEXT, arrowcolor=self.TEXT_DIM,
+                       selectbackground=self.ACCENT, selectforeground="white",
+                       borderwidth=0, relief="flat")
+        _cs.map("Profile.TCombobox",
+                fieldbackground=[("readonly", "#090b10")],
+                foreground=[("readonly", self.TEXT)],
+                background=[("readonly", self.BORDER),
+                             ("active",   self.BORDER)])
+
+        # Select existing profile
+        self.profile_var = tk.StringVar()
+        self._profile_combo = ttk.Combobox(
+            sidebar, textvariable=self.profile_var,
+            state="readonly", font=small, style="Profile.TCombobox")
+        self._profile_combo.pack(fill="x", padx=14, pady=(0, 4))
+        self._profile_combo.bind("<<ComboboxSelected>>",
+                                  self._on_profile_select)
+
+        # Name entry + Save button on the same row
+        _pn_row = tk.Frame(sidebar, bg=self.PANEL)
+        _pn_row.pack(fill="x", padx=14, pady=(0, 4))
+        self.profile_name_var = tk.StringVar()
+        tk.Entry(_pn_row, textvariable=self.profile_name_var, font=mono,
+                 bg="#090b10", fg=self.TEXT, insertbackground=self.TEXT,
+                 relief="flat", bd=4).pack(side="left", fill="x", expand=True)
+        tk.Button(_pn_row, text="Save", font=small,
+                  bg=self.ACCENT, fg="white", bd=0, cursor="hand2",
+                  activebackground="#6d28d9", activeforeground="white",
+                  padx=8, pady=2,
+                  command=self._save_profile).pack(side="right", padx=(4, 0))
+
+        # Delete button (right-aligned, subtle)
+        tk.Button(sidebar, text="Delete Profile", font=small,
+                  bg=self.BORDER, fg=self.TEXT_DIM, bd=0, cursor="hand2",
+                  activebackground=self.ERROR, activeforeground="white",
+                  padx=8, pady=2,
+                  command=self._delete_profile).pack(
+                      anchor="e", padx=14, pady=(0, 8))
+
+        self._lock_btn = tk.Button(
+            sidebar, text="🔓 Set Password", font=small,
+            bg=self.BORDER, fg=self.TEXT_DIM, bd=0, cursor="hand2",
+            activebackground=self.ACCENT, activeforeground="white",
+            padx=8, pady=2,
+            command=self._on_lock_btn)
+        self._lock_btn.pack(anchor="e", padx=14, pady=(0, 8))
+
+        # ── connection fields ──────────────────────────────────────────────
         section("CONNECTION")
 
         lbl("Host / IP")
@@ -2204,6 +2963,8 @@ class TorMonitorApp:
                 self._ui_log("Tor control port reconnected ✓", "ok")
             else:
                 self._ui_log("Tor control port connected", "ctrl")
+            self._ctrl_down_rounds = 0
+            self._ctrl_update_hint = False
             self._hide_overlay()
             self._restart_tor_btn.pack_forget()
             self._set_status("connected",
@@ -2225,7 +2986,17 @@ class TorMonitorApp:
             if self._ssh and self._ssh.is_alive() and self._ssh.client:
                 transport = self._ssh.client.get_transport()
                 if transport and transport.is_active():
+                    self._ctrl_down_rounds += 1
                     self._ui_log("Will attempt to reconnect control port…", "info")
+                    # After 2 consecutive failed reconnect cycles while SSH stays
+                    # alive, Tor is likely mid-restart due to system updates.
+                    # Show a one-time explanatory message so the user isn't alarmed.
+                    if self._ctrl_down_rounds >= 2 and not self._ctrl_update_hint:
+                        self._ctrl_update_hint = True
+                        self._ui_log(
+                            "Tor is taking longer than expected to reconnect — "
+                            "this often happens when the host is running system "
+                            "updates (e.g. apt upgrade). Still retrying…", "warn")
                     self._set_status("warn",
                                      f"Control port down · {self.cfg.get('host', '')} — reconnecting…")
                     self._ctrl_retry_count = 0
@@ -2240,20 +3011,27 @@ class TorMonitorApp:
                 except Exception: pass
                 self._ssh_retry_id = None
             self._ssh_retry_count = 0
-            self._set_status("connected",
-                              f"Connected · {self.cfg.get('host','')}")
             self._ui_log(f"SSH ready — mode: {mode}", "ok")
-            self._hide_overlay()
-            # Stay on dashboard by default — user can switch to terminal manually.
-            # For shell mode, switch to terminal automatically (no dashboard data).
-            if mode == "shell" and self._view_mode == "dashboard":
-                self._toggle_view()
-            # Start ctrl worker for nyx mode only.
-            # Small delay lets nyx finish starting and Tor's control socket settle.
-            if mode == "nyx" and self._ssh:
-                _sid = self._session
-                self.root.after(2000,
-                    lambda: self._start_ctrl() if self._session == _sid else None)
+            if mode == "shell":
+                # Shell mode: overlay done, switch to terminal view.
+                self._set_status("connected",
+                                  f"Connected · {self.cfg.get('host','')}")
+                self._hide_overlay()
+                if self._view_mode == "dashboard":
+                    self._toggle_view()
+            else:
+                # Nyx mode: keep the overlay alive but show a progress screen
+                # so the user knows we're waiting for the Tor control port.
+                # The overlay is hidden when ctrl_up fires.
+                self._set_status("connecting",
+                                  f"SSH connected · {self.cfg.get('host','')} "
+                                  f"— awaiting Tor control port…")
+                self._show_ctrl_wait_overlay(self.cfg.get("host", ""))
+                # Small delay lets nyx finish starting and Tor's control socket settle.
+                if self._ssh:
+                    _sid = self._session
+                    self.root.after(2000,
+                        lambda: self._start_ctrl() if self._session == _sid else None)
 
         elif kind == "ssh_down":
             self._ssh = None
@@ -2361,6 +3139,8 @@ class TorMonitorApp:
         self._ctrl_retry_count  = 0
         self._ctrl_retry_id     = None
         self._ctrl_reconnecting = False
+        self._ctrl_down_rounds  = 0
+        self._ctrl_update_hint  = False
         self._ssh_retry_count   = 0
         self._ssh_retry_id      = None
         self._ssh_retry_cfg     = cfg
@@ -2594,6 +3374,13 @@ class TorMonitorApp:
 
     def _on_disconnected(self):
         self.dashboard.reset()
+        self.dashboard.reset_layout()
+        # Collapse the debug log pane back to its default hidden state
+        if self._log_vis:
+            self._log_vis = False
+            self._log_frame.pack_forget()
+            self._log_toggle_btn.config(bg=self.BORDER, fg=self.TEXT_DIM)
+        self._log_height = self._s(160)
         self.connect_btn.config(state="normal")
         self.shell_btn.config(state="normal")
         self.disconnect_btn.config(state="disabled")
@@ -2688,6 +3475,96 @@ class TorMonitorApp:
         self._overlay_lbl.pack(pady=(10, 0))
         self._spin_tick()
 
+    def _show_ctrl_wait_overlay(self, host: str):
+        """Transition the overlay to a 'waiting for Tor control port' state.
+
+        Called after SSH+nyx are ready but before CtrlWorker has connected.
+        Shows confirmed steps (SSH ✓, nyx ✓) and a live elapsed timer so
+        the user knows the 15-20 s wait is normal.
+        """
+        self._hide_overlay()
+
+        ov = tk.Frame(self._right, bg=self.BG)
+        ov.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._overlay = ov
+
+        self._spin_chars = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+        self._spin_idx   = 0
+
+        ov.grid_rowconfigure(0, weight=1)
+        ov.grid_rowconfigure(2, weight=1)
+        ov.grid_columnconfigure(0, weight=1)
+        ov.grid_columnconfigure(2, weight=1)
+        col = tk.Frame(ov, bg=self.BG)
+        col.grid(row=1, column=1)
+
+        tk.Label(col, text="⬡", font=("Segoe UI", self._sf(40)),
+                 fg=self.ACCENT, bg=self.BG).pack(pady=(0, 10))
+        tk.Label(col, text="ESTABLISHING CONNECTION",
+                 font=self._font(["Segoe UI","Arial"], self._sf(11), bold=True),
+                 fg=self.TEXT, bg=self.BG).pack()
+        tk.Label(col, text=host,
+                 font=self._font(["Cascadia Code","Consolas","Courier New"], self._sf(9)),
+                 fg=self.TEXT_DIM, bg=self.BG).pack(pady=(2, 14))
+
+        # Step indicator rows
+        steps = tk.Frame(col, bg=self.BG)
+        steps.pack(fill="x", pady=(0, 14))
+
+        def _step(icon, text, color):
+            row = tk.Frame(steps, bg=self.BG)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=icon,
+                     font=self._font(["Segoe UI","Arial"], self._sf(10)),
+                     fg=color, bg=self.BG, width=3, anchor="center").pack(side="left")
+            tk.Label(row, text=text,
+                     font=self._font(["Segoe UI","Arial"], self._sf(9)),
+                     fg=color, bg=self.BG, anchor="w").pack(side="left")
+
+        _step("✓", "SSH tunnel established", self.SUCCESS)
+        _step("✓", "Nyx monitor launched",   self.SUCCESS)
+
+        # Animated spinner row for ctrl port
+        spin_row = tk.Frame(steps, bg=self.BG)
+        spin_row.pack(fill="x", pady=2)
+        self._spin_lbl = tk.Label(spin_row, text="⠋",
+                                   font=self._font(["Segoe UI","Arial"], self._sf(10)),
+                                   fg=self.ACCENT, bg=self.BG, width=3, anchor="center")
+        self._spin_lbl.pack(side="left")
+        tk.Label(spin_row, text="Connecting to Tor control port…",
+                 font=self._font(["Segoe UI","Arial"], self._sf(9)),
+                 fg=self.TEXT_DIM, bg=self.BG, anchor="w").pack(side="left")
+
+        tk.Label(col,
+                 text="This may take up to 20 s while nyx initializes",
+                 font=self._font(["Segoe UI","Arial"], self._sf(8)),
+                 fg=self.TEXT_DIM, bg=self.BG).pack(pady=(0, 8))
+
+        self._ctrl_wait_t0  = time.time()
+        self._ctrl_wait_lbl = tk.Label(
+            col, text="elapsed  0:00",
+            font=self._font(["Cascadia Code","Consolas","Courier New"], self._sf(8)),
+            fg=self.TEXT_DIM, bg=self.BG)
+        self._ctrl_wait_lbl.pack()
+
+        self._spin_tick()
+        self._ctrl_wait_tick()
+
+    def _ctrl_wait_tick(self):
+        """Update the elapsed-time label on the ctrl-wait overlay every second."""
+        lbl = getattr(self, "_ctrl_wait_lbl", None)
+        if not self._overlay or not lbl:
+            return
+        try:
+            if not lbl.winfo_exists():
+                return
+        except Exception:
+            return
+        elapsed = int(time.time() - self._ctrl_wait_t0)
+        m, s    = divmod(elapsed, 60)
+        lbl.config(text=f"elapsed  {m}:{s:02d}")
+        self.root.after(1000, self._ctrl_wait_tick)
+
     def _spin_tick(self):
         if not self._overlay or not self._spin_lbl or not self._spin_lbl.winfo_exists():
             return
@@ -2718,6 +3595,7 @@ class TorMonitorApp:
             self._overlay      = None
             self._overlay_lbl  = None
             self._spin_lbl     = None
+            self._ctrl_wait_lbl = None
             # Splash item refs are children of overlay — clear so _sel()
             # never calls .config() on already-destroyed widgets.
             self._splash_items = []
@@ -3125,6 +4003,16 @@ class TorMonitorApp:
         else:
             self._log_frame.pack_forget()
             self._log_toggle_btn.config(bg=self.BORDER, fg=self.TEXT_DIM)
+
+    def _dashboard_bottom_drag_start(self, event):
+        """Bottom handle of the dashboard — shows the log if hidden, then drags."""
+        if not self._log_vis:
+            self._log_vis = True
+            self._log_frame.configure(height=max(60, self._log_height))
+            self._log_frame.pack(side="bottom", fill="x",
+                                  before=self._view_container)
+            self._log_toggle_btn.config(bg=self.ACCENT, fg="white")
+        self._log_drag_start(event)
 
     def _log_drag_start(self, event):
         self._log_drag_y = event.y_root

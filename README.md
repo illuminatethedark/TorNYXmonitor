@@ -1,4 +1,8 @@
-# Tor NYX Monitor  v0.2.1
+# Tor NYX Monitor  v0.2.2
+
+> ⚠️ **README DRAFT — PENDING REVIEW**
+> This section was auto-generated and has not yet been manually reviewed.
+> Please verify accuracy before publishing or sharing.
 
 A desktop application for monitoring a remote Tor relay over SSH.
 Runs on **Windows, Linux, and macOS**.
@@ -6,29 +10,70 @@ Connects to a Raspberry Pi (or any Linux host) running Tor, launches **nyx**
 inside a PTY, streams the terminal to a canvas widget, and exposes a live
 dashboard fed by the Tor control port.
 
+---
+
 ## Features
 
 - **Live dashboard** — bandwidth sparkline (read/write EMA), relay identity
   (nickname, address, fingerprint, OR port, Tor version, uptime, flags, BW rate),
   OR-connection list, circuit counters, event log
-- **Three graph modes** — Bandwidth, Connections, Resources (circuits)
+- **Three graph modes** — Bandwidth, Connections, Resources (circuits); all modes
+  refresh at ~1 Hz clocked by BW events; Resources shows per-event deltas (not
+  cumulative totals) so activity is always visible
+- **Connections sort control** — cycle through Direction (inbound first), Status,
+  Name (alphabetical), or Default (Tor order) via the `↕` button in the
+  connections header
+- **Connection profiles** — save multiple named SSH connection profiles; switch
+  between them via a dropdown; credentials stored in the OS credential store
+  (Windows DPAPI, macOS Keychain, Linux SecretService / keyring)
+- **Master password protection** — optionally encrypt the entire profiles file
+  with AES-256-GCM, key derived via PBKDF2-HMAC-SHA256 (480,000 iterations);
+  requires the `cryptography` package; wrong password offers retry on startup
+- **Resolution-aware UI scaling** — reads screen resolution on launch and scales
+  all fonts, widgets, and layout proportionally (baseline 1920×1080 = 1.0×;
+  clamped to 0.65×–1.8×)
+- **Connection loading screen** — while waiting for the Tor control port to
+  authenticate after SSH is ready, a full overlay shows SSH ✓, nyx ✓, and a
+  live spinner + elapsed timer so users know the app is working
+- **System-update detection** — after two consecutive failed Tor control-port
+  reconnect cycles (while SSH stays alive), a one-time hint is shown explaining
+  that host system updates (e.g. `apt upgrade`) commonly cause this pattern
 - **Tor control port** — cookie-authenticated, subscribes to BW / CIRC /
   ORCONN / STREAM / ADDRMAP events
 - **Auto-reconnect** — exponential back-off for both SSH and control-port drops;
   automatic `systemctl restart tor` when the control port is unreachable
 - **Sleep/wake recovery** — detects system suspend via poll-gap monitoring and
   automatically reconnects SSH after resume (4 s NIC settle delay)
+- **Layout reset on disconnect** — panel sizes (identity section, debug log)
+  return to their defaults on each disconnect so every new connection starts fresh
+- **Resizable panels** — drag the handle between Relay Identity and Events to
+  resize vertically; drag the handle between the dashboard and debug log to
+  reveal/resize the log pane
 - **SSH shell mode** — raw PTY shell as an alternative to nyx
 - **TOFU host-key policy** — trust-on-first-use, stored in `~/.tor_bridge_monitor_known_hosts`
 - **Debug log panel** — draggable, with Copy / Clear / Open-log-file actions
 - Dark theme (TokyoNight palette)
 
+---
+
 ## Requirements
 
 ### Host machine (Windows, Linux, or macOS)
+
 - Python 3.9+
-- `pip install paramiko pyte`
-- **Linux only:** tkinter is not always bundled with Python — install it via your package manager if needed:
+- **Required:**
+  ```
+  pip install paramiko pyte
+  ```
+- **Optional — for master password profile encryption:**
+  ```
+  pip install cryptography
+  ```
+  Without this package the app runs normally; the `🔓 Set Password` button will
+  show a disabled hint to install it.
+
+- **Linux only:** tkinter is not always bundled with Python — install via your
+  package manager if needed:
   ```
   sudo apt install python3-tk      # Debian/Ubuntu
   sudo dnf install python3-tkinter # Fedora
@@ -36,11 +81,13 @@ dashboard fed by the Tor control port.
   ```
 
 ### Raspberry Pi (or remote host)
+
 ```
 # /etc/tor/torrc
 ControlPort 9051
 CookieAuthentication 1
 ```
+
 The SSH user needs passwordless sudo for:
 ```
 sudo systemctl restart tor
@@ -48,6 +95,8 @@ sudo systemctl enable tor
 sudo systemctl is-active tor
 sudo cat /var/run/tor/control.authcookie   # for cookie auth
 ```
+
+---
 
 ## Running
 
@@ -57,6 +106,7 @@ python tor_bridge_monitor.py
 ```
 
 ### Linux / macOS
+
 1. Install system dependencies (if not already present):
    ```bash
    # Debian / Ubuntu
@@ -73,6 +123,7 @@ python tor_bridge_monitor.py
 2. Install Python dependencies:
    ```bash
    pip install paramiko pyte
+   # Optional: pip install cryptography
    ```
 
 3. Run:
@@ -113,13 +164,15 @@ rm ~/.local/share/applications/tor_bridge_monitor.desktop
 rm ~/Desktop/tor_bridge_monitor.desktop   # if created
 ```
 
+---
+
 ## Building
 
 ### Windows
 ```bat
 windows\windows_build.bat
 ```
-Produces `dist\Tor NYX Monitor v0.2.1.exe` (~17 MB, single file).
+Produces `dist\Tor NYX Monitor v0.2.2.exe` (~17 MB, single file).
 
 ### Linux (PyInstaller)
 
@@ -156,6 +209,8 @@ Produces `dist\Tor NYX Monitor v0.2.1.exe` (~17 MB, single file).
        --hidden-import pyte.graphics \
        --hidden-import cryptography \
        --hidden-import cryptography.hazmat.primitives \
+       --hidden-import cryptography.hazmat.primitives.kdf.pbkdf2 \
+       --hidden-import cryptography.hazmat.primitives.ciphers.aead \
        --hidden-import cryptography.hazmat.backends \
        --hidden-import nacl \
        --hidden-import nacl.signing \
@@ -173,24 +228,40 @@ Produces `dist\Tor NYX Monitor v0.2.1.exe` (~17 MB, single file).
 > **Note:** Some distributions require `python3-tk` to be installed system-wide
 > even when using a virtualenv — it cannot be installed via pip.
 
+---
+
 ## Cross-platform notes
 
-The app runs on Windows, Linux, and macOS. All core functionality is platform-neutral. The only OS-specific code is a Windows DWM call (`DwmSetWindowAttribute`) that enables a dark native title bar — it uses `GetParent()` to obtain the correct top-level HWND and tries both attribute 20 (Windows 10 1903+/Windows 11) and attribute 19 (older Windows 10 builds) for maximum compatibility. This call is silently skipped on Linux and macOS.
+The app runs on Windows, Linux, and macOS. All core functionality is
+platform-neutral. The only OS-specific code is:
+
+- A Windows DWM call (`DwmSetWindowAttribute`) that enables a dark native title
+  bar — tries attributes 20 (Windows 11 / 10 1903+) and 19 (older Windows 10)
+  for maximum compatibility; silently skipped on Linux/macOS.
+- Credential storage uses Windows DPAPI on Windows, the system keyring on Linux/macOS
+  (via the `keyring` package if installed), falling back to plaintext with a warning.
 
 | Feature | Windows | Linux | macOS |
 |---------|---------|-------|-------|
 | Core monitoring & SSH | ✓ | ✓ | ✓ |
 | Tor control port dashboard | ✓ | ✓ | ✓ |
+| Master password (AES-256-GCM) | ✓ | ✓ | ✓ |
+| OS credential store | DPAPI | SecretService / keyring | Keychain |
 | Dark title bar | ✓ | — | — |
 | `.exe` build via `windows/windows_build.bat` | ✓ | — | — |
 
-## Config & logs
+---
+
+## Config & data files
 
 | File | Purpose |
 |------|---------|
-| `~/.tor_bridge_monitor.json` | SSH credentials (password stripped when key file is set) |
+| `~/.tor_bridge_monitor.json` | Last-used SSH connection (auto-saved) |
+| `~/.tor_bridge_monitor_profiles.json` | Named connection profiles (plaintext or AES-256-GCM encrypted) |
 | `~/.tor_bridge_monitor_known_hosts` | TOFU SSH host keys |
 | `~/.tor_bridge_monitor.log` | Rotating log (2 MB × 3 backups) |
+
+---
 
 ## Architecture
 
@@ -205,9 +276,37 @@ SSHWorker  ──┐
 CtrlWorker ──┘
 ```
 
+---
+
 ## Changelog
 
-### v2.1 (current)
+### v0.2.2
+- **Master password protection** — optional AES-256-GCM encryption for the
+  profiles file; key derived via PBKDF2-HMAC-SHA256 (480,000 iterations);
+  prompted on first profile save; unlock dialog on startup if encrypted;
+  `🔓 Set Password` / `🔒 Change Password` button in the Profiles sidebar;
+  requires `pip install cryptography`
+- **Connection profiles** — save, load, rename, and delete named SSH profiles;
+  OS credential store integration (DPAPI / keyring / plaintext fallback) for
+  SSH passwords within profiles
+- **Connections sort control** — `↕` button in connections header cycles through
+  Direction, Status, Name, and Default sort orders; applies instantly from cache
+- **Resolution-aware UI scaling** — all sizes, fonts, and layout scale
+  proportionally to the detected screen resolution (1920×1080 baseline)
+- **Control-port loading overlay** — full-screen progress screen shown while
+  waiting for Tor control port authentication after SSH connects; shows live
+  spinner and elapsed timer
+- **System-update detection** — after two consecutive failed reconnect cycles
+  (Tor restarting with SSH still alive), a one-time explanatory message is shown
+- **Graph fixes** — Resources graph now stores per-event circuit deltas (was
+  cumulative totals that flatlined the chart); all three graph modes redraw at
+  ~1 Hz via BW events (Connections and Resources no longer appear frozen)
+- **Events section resize** — drag handle at top and bottom of the Events panel
+  for vertical resizing
+- **Layout reset on disconnect** — panel sizes reset to defaults on each
+  disconnect so each new connection starts with a clean layout
+
+### v0.2.1
 - **Relay identity uptime** — dashboard now shows formatted uptime (`Xd Xh Xm`)
   sourced from `GETINFO uptime`
 - **Dark native title bar** — fixed DWM call to use `GetParent()` for the correct
@@ -217,7 +316,7 @@ CtrlWorker ──┘
 - Bug fix: `_show_actions_menu` closure no longer references `_selected` /
   `_dismiss_id` from the wrong scope; double-destroy race on menu click resolved
 
-### v2 (initial release)
+### v0.2 (initial release)
 - Full rewrite — two-worker, single-queue architecture
 - Live dashboard with graph mode switcher
 - Auto-restart Tor on control-port exhaustion
