@@ -1944,8 +1944,8 @@ class DashboardPanel(tk.Frame):
         """Clear canvas and return (canvas, w, h, pt, pb, ph)."""
         c  = self._bw_canvas
         c.delete("all")
-        w  = c.winfo_width()  or 600
-        h  = c.winfo_height() or 110
+        w  = c.winfo_width()  if c.winfo_width()  > 1 else 600
+        h  = c.winfo_height() if c.winfo_height() > 1 else 110
         pt, pb = 8, 8
         ph = h - pt - pb
         for frac in (0.25, 0.5, 0.75):
