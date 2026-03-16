@@ -1,5 +1,5 @@
 """
-Tor NYX Monitor v0.2.2
+Tor NYX Monitor v0.2.3
 ======================================
 Two worker threads (SSH + Tor control port) post events onto a single queue.
 The main tkinter thread drains that queue every 50 ms and updates the UI.
@@ -14,7 +14,7 @@ Requirements:
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 import base64
 import collections
@@ -3024,9 +3024,10 @@ class TorMonitorApp:
             pass
 
         # Coalesced graph redraw — at most once per 50 ms poll tick.
-        if self._dash is not None and self._dash._graph_dirty:
-            self._dash._redraw_graph()
-            self._dash._graph_dirty = False
+        _dash = getattr(self, "_dash", None)
+        if _dash is not None and _dash._graph_dirty:
+            _dash._redraw_graph()
+            _dash._graph_dirty = False
 
         # Guard against rescheduling after root.destroy() has been queued
         # from the background join thread — winfo_exists() is False by then.

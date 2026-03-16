@@ -1,4 +1,4 @@
-# Tor NYX Monitor  v0.2.2
+# Tor NYX Monitor  v0.2.3
 
 > ⚠️ **README DRAFT — PENDING REVIEW**
 > This section was auto-generated and has not yet been manually reviewed.
@@ -172,7 +172,7 @@ rm ~/Desktop/tor_bridge_monitor.desktop   # if created
 ```bat
 windows\windows_build.bat
 ```
-Produces `dist\Tor NYX Monitor v0.2.2.exe` (~17 MB, single file).
+Produces `dist\Tor NYX Monitor v0.2.3.exe` (~17 MB, single file).
 
 ### Linux (PyInstaller)
 
@@ -279,6 +279,27 @@ CtrlWorker ──┘
 ---
 
 ## Changelog
+
+### v0.2.3
+- **Custom profile selector** — replaced `ttk.Combobox` (OS-native popup that
+  couldn't be themed) with a fully styled flat dropdown matching the app's dark
+  palette; hover highlights, Escape-to-close, and outside-click dismiss
+- **Graph hang fix** — bandwidth redraws coalesced to one per 50 ms poll tick
+  via a dirty flag; eliminates UI stutter when BW events arrive faster than the
+  canvas can flush
+- **Instant view switching** — switching graph mode to Connections or Resources
+  immediately populates from buffered data (cached connection list / circuit
+  counts) rather than waiting for the next incoming event
+- **System update module** — new "⬆ Update System" button in the status bar;
+  runs `apt-get update && apt-get upgrade` on the remote host over SSH with
+  streaming line-by-line output to the debug log; button visible only while SSH
+  is connected, disabled during the run, restored on completion
+- **Control-port wait timer** — label updated from "20 s" to "30 s" to match
+  observed real-world nyx startup times
+- **Bug fixes** — `save_config` and `load_profiles` silent failures now logged;
+  `CtrlWorker._send()` guards against sending on a `None` socket; `_poll()`
+  startup race fixed (`_dash` attribute guarded with `getattr` to handle early
+  scheduler ticks before full init)
 
 ### v0.2.2
 - **Master password protection** — optional AES-256-GCM encryption for the

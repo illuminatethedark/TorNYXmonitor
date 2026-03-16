@@ -1,9 +1,9 @@
 @echo off
-title Tor NYX Monitor v0.2.2 - Build EXE
+title Tor NYX Monitor v0.2.3 - Build EXE
 setlocal enabledelayedexpansion
 
 echo ================================================
-echo  Tor NYX Monitor v0.2.2 - EXE Builder
+echo  Tor NYX Monitor v0.2.3 - EXE Builder
 echo ================================================
 echo.
 
@@ -76,7 +76,7 @@ echo.
 "!PYTHON_EXE!" -m PyInstaller ^
     --onefile ^
     --windowed ^
-    --name "Tor NYX Monitor v0.2.2" ^
+    --name "Tor NYX Monitor v0.2.3" ^
     --distpath "%ROOT_DIR%\dist" ^
     --workpath "%ROOT_DIR%\build" ^
     --specpath "%ROOT_DIR%" ^
@@ -129,9 +129,9 @@ if errorlevel 1 (
 :: ── Verify output ─────────────────────────────────────────────────────
 echo.
 echo [4/4] Verifying output...
-if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.2.exe" (
-    echo        SUCCESS: dist\Tor NYX Monitor v0.2.2.exe created.
-    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.2.exe") do echo        Size: %%~zi bytes
+if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.3.exe" (
+    echo        SUCCESS: dist\Tor NYX Monitor v0.2.3.exe created.
+    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.3.exe") do echo        Size: %%~zi bytes
 ) else (
     echo  ERROR: exe not found in dist\ folder.
     pause & exit /b 1
@@ -141,13 +141,13 @@ if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.2.exe" (
 echo.
 echo        Cleaning up build files...
 if exist "%ROOT_DIR%\build"                         rmdir /s /q "%ROOT_DIR%\build"
-if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.2.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.2.spec"
+if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.3.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.3.spec"
 echo        Done.
 
 echo.
 echo ================================================
 echo  Build complete!
-echo  Your exe is at:  dist\Tor NYX Monitor v0.2.2.exe
+echo  Your exe is at:  dist\Tor NYX Monitor v0.2.3.exe
 echo.
 echo  NOTE: Windows SmartScreen may warn on first run
 echo  because the exe is unsigned. Click "More info"
