@@ -38,9 +38,9 @@ if errorlevel 1 (
         pause & exit /b 1
     )
 
-    :: Install to a local folder — no system PATH changes
-    :: /passive shows a progress bar (no clicks needed) and returns a non-zero
-    :: exit code on failure, unlike /quiet which can fail silently.
+    rem Install to a local folder — no system PATH changes
+    rem /passive shows a progress bar (no clicks needed) and returns a non-zero
+    rem exit code on failure, unlike /quiet which can fail silently.
     if exist "!BOOTSTRAP_PYTHON_DIR!" rmdir /s /q "!BOOTSTRAP_PYTHON_DIR!"
     "!PYINST!" /passive InstallAllUsers=0 PrependPath=0 Include_test=0 ^
         Include_launcher=0 TargetDir="!BOOTSTRAP_PYTHON_DIR!"
