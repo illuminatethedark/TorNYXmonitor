@@ -1,9 +1,9 @@
 @echo off
-title Tor NYX Monitor v0.2.3 - Build EXE
+title Tor NYX Monitor v0.2.4 - Build EXE
 setlocal enabledelayedexpansion
 
 echo ================================================
-echo  Tor NYX Monitor v0.2.3 - EXE Builder
+echo  Tor NYX Monitor v0.2.4 - EXE Builder
 echo ================================================
 echo.
 
@@ -17,13 +17,56 @@ if not exist "%ROOT_DIR%\tor_bridge_monitor.py" (
     pause & exit /b 1
 )
 
-:: ── Locate Python ─────────────────────────────────────────────────────
+:: ── Locate Python (bootstrap if not found) ───────────────────────────
+set "BOOTSTRAP_PYTHON_DIR=%~dp0_python_build"
+set "BOOTSTRAP_PYTHON_EXE=%BOOTSTRAP_PYTHON_DIR%\python.exe"
+set "_PYTHON_BOOTSTRAPPED=0"
+
 where python >nul 2>&1
 if errorlevel 1 (
-    echo  ERROR: Python not found. Install from https://python.org
-    echo  Tick "Add Python to PATH" during install.
-    pause & exit /b 1
+    echo  Python not found in PATH — downloading Python 3.12 installer for build...
+    echo  ^(This will not affect your system installation.^)
+    echo.
+
+    set "PYVER=3.12.10"
+    set "PYINST=%TEMP%\python312_setup.exe"
+    set "PYURL=https://www.python.org/ftp/python/!PYVER!/python-!PYVER!-amd64.exe"
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri '!PYURL!' -OutFile '!PYINST!' -UseBasicParsing"
+    if errorlevel 1 (
+        echo  ERROR: Failed to download Python installer. Check your internet connection.
+        echo  Alternatively install Python manually from https://python.org
+        pause & exit /b 1
+    )
+
+    :: Install to a local folder — no system PATH changes
+    :: /passive shows a progress bar (no clicks needed) and returns a non-zero
+    :: exit code on failure, unlike /quiet which can fail silently.
+    if exist "!BOOTSTRAP_PYTHON_DIR!" rmdir /s /q "!BOOTSTRAP_PYTHON_DIR!"
+    "!PYINST!" /passive InstallAllUsers=0 PrependPath=0 Include_test=0 ^
+        Include_launcher=0 TargetDir="!BOOTSTRAP_PYTHON_DIR!"
+    if errorlevel 1 (
+        echo  ERROR: Python installer exited with an error.
+        echo  This can happen if Windows policy blocks the install, or if UAC
+        echo  was declined. Try running this script as Administrator, or install
+        echo  Python 3.12 manually from https://python.org then re-run the build.
+        del /q "!PYINST!" 2>nul
+        pause & exit /b 1
+    )
+    del /q "!PYINST!" 2>nul
+    if not exist "!BOOTSTRAP_PYTHON_EXE!" (
+        echo  ERROR: Python installer completed but python.exe was not found at:
+        echo    !BOOTSTRAP_PYTHON_DIR!
+        echo  The installer may have chosen a different target directory.
+        echo  Install Python 3.12 manually from https://python.org then re-run.
+        pause & exit /b 1
+    )
+
+    set "PATH=!BOOTSTRAP_PYTHON_DIR!;!BOOTSTRAP_PYTHON_DIR!\Scripts;!PATH!"
+    set "_PYTHON_BOOTSTRAPPED=1"
+    echo  Bootstrap complete.
+    echo.
 )
+
 for /f "tokens=*" %%i in ('where python') do (
     set PYTHON_EXE=%%i
     goto :found_python
@@ -64,7 +107,7 @@ echo        OK.
 :: ── Resolve icon ──────────────────────────────────────────────────────
 set "ICON_ARG="
 if exist "%ROOT_DIR%\icon.ico" (
-    set "ICON_ARG=--icon=%ROOT_DIR%\icon.ico"
+    set "ICON_ARG=--icon="%ROOT_DIR%\icon.ico""
     echo  Using icon: %ROOT_DIR%\icon.ico
 )
 
@@ -76,7 +119,7 @@ echo.
 "!PYTHON_EXE!" -m PyInstaller ^
     --onefile ^
     --windowed ^
-    --name "Tor NYX Monitor v0.2.3" ^
+    --name "Tor NYX Monitor v0.2.4" ^
     --distpath "%ROOT_DIR%\dist" ^
     --workpath "%ROOT_DIR%\build" ^
     --specpath "%ROOT_DIR%" ^
@@ -129,9 +172,9 @@ if errorlevel 1 (
 :: ── Verify output ─────────────────────────────────────────────────────
 echo.
 echo [4/4] Verifying output...
-if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.3.exe" (
-    echo        SUCCESS: dist\Tor NYX Monitor v0.2.3.exe created.
-    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.3.exe") do echo        Size: %%~zi bytes
+if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe" (
+    echo        SUCCESS: dist\Tor NYX Monitor v0.2.4.exe created.
+    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe") do echo        Size: %%~zi bytes
 ) else (
     echo  ERROR: exe not found in dist\ folder.
     pause & exit /b 1
@@ -141,13 +184,32 @@ if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.3.exe" (
 echo.
 echo        Cleaning up build files...
 if exist "%ROOT_DIR%\build"                         rmdir /s /q "%ROOT_DIR%\build"
-if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.3.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.3.spec"
+if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.4.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.4.spec"
+if "!_PYTHON_BOOTSTRAPPED!"=="1" (
+    echo        Removing bootstrapped Python...
+    rmdir /s /q "!BOOTSTRAP_PYTHON_DIR!" 2>nul
+)
 echo        Done.
+
+:: ── Optional: create Desktop shortcut ────────────────────────────────
+echo.
+set /p "_CREATE_SC=  Create a Desktop shortcut for the built exe? [Y/N]: "
+if /i "!_CREATE_SC!"=="Y" (
+    set "SC_TARGET=%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe"
+    set "SC_LINK=%USERPROFILE%\Desktop\Tor NYX Monitor.lnk"
+    set "SC_ICON=%ROOT_DIR%\icon.ico"
+    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $sc=$s.CreateShortcut('!SC_LINK!'); $sc.TargetPath='!SC_TARGET!'; $sc.IconLocation='!SC_ICON!'; $sc.Description='Monitor a remote Tor relay over SSH'; $sc.WorkingDirectory='!ROOT_DIR!\dist'; $sc.Save()"
+    if exist "!SC_LINK!" (
+        echo   [OK] Desktop shortcut created.
+    ) else (
+        echo   [!] Shortcut creation failed — create it manually if needed.
+    )
+)
 
 echo.
 echo ================================================
 echo  Build complete!
-echo  Your exe is at:  dist\Tor NYX Monitor v0.2.3.exe
+echo  Your exe is at:  dist\Tor NYX Monitor v0.2.4.exe
 echo.
 echo  NOTE: Windows SmartScreen may warn on first run
 echo  because the exe is unsigned. Click "More info"

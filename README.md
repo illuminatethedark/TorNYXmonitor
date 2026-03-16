@@ -1,8 +1,4 @@
-# Tor NYX Monitor  v0.2.3
-
-> ⚠️ **README DRAFT — PENDING REVIEW**
-> This section was auto-generated and has not yet been manually reviewed.
-> Please verify accuracy before publishing or sharing.
+# Tor NYX Monitor  v0.2.4
 
 A desktop application for monitoring a remote Tor relay over SSH.
 Runs on **Windows, Linux, and macOS**.
@@ -17,6 +13,8 @@ dashboard fed by the Tor control port.
 - **Live dashboard** — bandwidth sparkline (read/write EMA), relay identity
   (nickname, address, fingerprint, OR port, Tor version, uptime, flags, BW rate),
   OR-connection list, circuit counters, event log
+- **Live uptime counter** — dashboard uptime ticks every second, synced to the
+  Tor control port `GETINFO uptime` value; no extra polling after the initial read
 - **Three graph modes** — Bandwidth, Connections, Resources (circuits); all modes
   refresh at ~1 Hz clocked by BW events; Resources shows per-event deltas (not
   cumulative totals) so activity is always visible
@@ -158,11 +156,14 @@ The installer handles everything in one step:
 
 A completion dialog confirms when setup is done.
 
-To uninstall the shortcut:
+To fully uninstall (shortcuts, venv, data files, and app folder):
 ```bash
-rm ~/.local/share/applications/tor_bridge_monitor.desktop
-rm ~/Desktop/tor_bridge_monitor.desktop   # if created
+chmod +x linux/unix_uninstall.sh
+./linux/unix_uninstall.sh
 ```
+The uninstaller removes desktop shortcuts, the applications menu entry, the local
+Python venv, user config/data files, and the app folder itself. System packages
+(`python3`, `python3-tk`) are left in place as they may be shared.
 
 ---
 
@@ -172,7 +173,18 @@ rm ~/Desktop/tor_bridge_monitor.desktop   # if created
 ```bat
 windows\windows_build.bat
 ```
-Produces `dist\Tor NYX Monitor v0.2.3.exe` (~17 MB, single file).
+Produces `dist\Tor NYX Monitor v0.2.4.exe` (~17 MB, single file).
+
+**No Python required** — if Python is not found in PATH, the build script
+automatically downloads the Python 3.12 full installer, uses it to run
+PyInstaller, then removes it. No system-wide PATH changes, no admin rights needed.
+
+To remove all app data after uninstalling the exe:
+```bat
+windows\windows_cleanup.bat
+```
+Deletes config files from `%USERPROFILE%`, the Desktop shortcut, and all saved
+passwords from Windows Credential Manager.
 
 ### Linux (PyInstaller)
 
@@ -249,6 +261,7 @@ platform-neutral. The only OS-specific code is:
 | OS credential store | DPAPI | SecretService / keyring | Keychain |
 | Dark title bar | ✓ | — | — |
 | `.exe` build via `windows/windows_build.bat` | ✓ | — | — |
+| Cleanup script | `windows/windows_cleanup.bat` | `linux/unix_uninstall.sh` | — |
 
 ---
 
@@ -279,6 +292,35 @@ CtrlWorker ──┘
 ---
 
 ## Changelog
+
+### v0.2.4
+- **Graph render fix** — graphs were not repainting during active sessions; root
+  cause was `_poll()` using `self._dash` (never assigned) instead of
+  `self.dashboard` to trigger bandwidth redraws — the dirty-flag redraw path was
+  completely dead. Fixed attribute reference.
+- **Canvas dimension caching** — graph canvas now caches its size from
+  `<Configure>` events (`event.width` / `event.height`) rather than calling
+  `winfo_width()` at draw time, which returns 1 before the widget is fully
+  realized and is unreliable on slow hardware (e.g. Raspberry Pi Zero 2W)
+- **Live uptime counter** — dashboard uptime label now ticks every second using
+  a `time.monotonic()` anchor set when the control port delivers `GETINFO uptime`;
+  no additional control-port polling required
+- **Uptime ticker resilience** — fixed a bug where the uptime ticker loop
+  terminated permanently after the first disconnect; ticker now runs continuously
+  and shows `—` while disconnected
+- **Windows Python bootstrap** — `windows_build.bat` now auto-downloads the
+  Python 3.12 full installer (not embeddable zip) when Python is absent from
+  PATH; uses `/passive` flag so install failures are detected; bootstrapped
+  Python is removed after the build completes
+- **Windows cleanup script** — new `windows/windows_cleanup.bat` removes all app
+  data: config/profile/log files from `%USERPROFILE%`, the Desktop shortcut, and
+  all saved passwords from Windows Credential Manager (`TorNYXMonitor/*` entries)
+- **Linux uninstaller** — new `linux/unix_uninstall.sh` fully removes the
+  application: desktop shortcuts, applications menu entry, Python venv, user
+  config/data files, and the app folder itself
+- **Linux desktop icon** — `unix_install_desktop.sh` now references `icon.png`
+  (256×256, included in the repo) instead of `icon.ico`; `.ico` files are not
+  supported by LXDE/GNOME desktop environments
 
 ### v0.2.3
 - **Custom profile selector** — replaced `ttk.Combobox` (OS-native popup that

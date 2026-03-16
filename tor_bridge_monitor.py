@@ -1,5 +1,5 @@
 """
-Tor NYX Monitor v0.2.3
+Tor NYX Monitor v0.2.4
 ======================================
 Two worker threads (SSH + Tor control port) post events onto a single queue.
 The main tkinter thread drains that queue every 50 ms and updates the UI.
@@ -14,7 +14,7 @@ Requirements:
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 import base64
 import collections
@@ -1428,7 +1428,13 @@ class DashboardPanel(tk.Frame):
         self._conn_sort      = "direction"  # active sort: direction|status|name|none
         self._graph_mode  = "Bandwidth"   # "Bandwidth" | "Connections" | "Resources"
         self._graph_dirty = False          # coalesces push_bw() redraws to one per poll tick
+        self._canvas_w    = 600            # cached from <Configure>; used by _canvas_base()
+        self._canvas_h    = 110            # fallback until first Configure event fires
+        self._uptime_base      = None      # int seconds from last GETINFO uptime
+        self._uptime_polled_at = None      # time.monotonic() at that poll
+        self._uptime_tick_id   = None      # after() id for the 1-second ticker
         self._build()
+        self._tick_uptime()
 
     # ── font helper ─────────────────────────────────────────────────────────
     def _f(self, families, size, bold=False):
@@ -1490,7 +1496,7 @@ class DashboardPanel(tk.Frame):
                                      highlightthickness=1,
                                      highlightbackground=self.BORDER)
         self._bw_canvas.pack(fill="x")
-        self._bw_canvas.bind("<Configure>", lambda _: self._redraw_graph())
+        self._bw_canvas.bind("<Configure>", self._on_canvas_configure)
 
         self._lbl_bw_max = tk.Label(bw_frame, text="", font=self._fmono_s,
                                      fg=self.TEXT_DIM, bg=self.BG, anchor="e")
@@ -1735,6 +1741,10 @@ class DashboardPanel(tk.Frame):
 
     def push_identity(self, d: dict):
         self._identity = d
+        secs = d.get("uptime")
+        if isinstance(secs, int):
+            self._uptime_base      = secs
+            self._uptime_polled_at = time.monotonic()
         self._refresh_identity()
 
     def push_circs(self, built: int, failed: int):
@@ -1882,8 +1892,10 @@ class DashboardPanel(tk.Frame):
         self._ev_text.delete("1.0", "end")
         self._ev_text.configure(state="disabled")
         for attr in ("_id_nick","_id_addr","_id_fp","_id_port","_id_ver",
-                     "_id_flags","_id_bwrate"):
+                     "_id_flags","_id_bwrate","_id_uptime"):
             getattr(self, attr).config(text="—")
+        self._uptime_base      = None
+        self._uptime_polled_at = None
         self.push_connections([])
         self._redraw_graph()
 
@@ -1940,12 +1952,34 @@ class DashboardPanel(tk.Frame):
         elif self._graph_mode == "Resources":
             self._redraw_resources_graph()
 
+    def _tick_uptime(self):
+        """1-second ticker: recomputes uptime from last-polled anchor + elapsed."""
+        if self._uptime_base is not None and self._uptime_polled_at is not None:
+            secs = self._uptime_base + int(time.monotonic() - self._uptime_polled_at)
+            d_ =  secs // 86400
+            h_ = (secs % 86400) // 3600
+            m_ = (secs %  3600) // 60
+            s_ =  secs % 60
+            if d_:
+                text = f"{d_}d {h_}h {m_}m {s_}s"
+            elif h_:
+                text = f"{h_}h {m_}m {s_}s"
+            else:
+                text = f"{m_}m {s_}s"
+            self._id_uptime.config(text=text)
+        self._uptime_tick_id = self._id_uptime.after(1000, self._tick_uptime)
+
+    def _on_canvas_configure(self, event):
+        self._canvas_w = event.width
+        self._canvas_h = event.height
+        self._redraw_graph()
+
     def _canvas_base(self):
         """Clear canvas and return (canvas, w, h, pt, pb, ph)."""
         c  = self._bw_canvas
         c.delete("all")
-        w  = c.winfo_width()  if c.winfo_width()  > 1 else 600
-        h  = c.winfo_height() if c.winfo_height() > 1 else 110
+        w  = self._canvas_w
+        h  = self._canvas_h
         pt, pb = 8, 8
         ph = h - pt - pb
         for frac in (0.25, 0.5, 0.75):
@@ -2036,16 +2070,6 @@ class DashboardPanel(tk.Frame):
             self._id_fp.config(text=grouped, font=self._ffp)
         else:
             self._id_fp.config(text="—")
-
-        secs = d.get("uptime")
-        if isinstance(secs, int):
-            d_  = secs // 86400
-            h_  = (secs % 86400) // 3600
-            m_  = (secs % 3600)  // 60
-            sl(self._id_uptime,
-               f"{d_}d {h_}h {m_}m" if d_ else f"{h_}h {m_}m")
-        else:
-            sl(self._id_uptime, "—")
 
         bwr  = d.get("bandwidthrate",  "")
         bwb  = d.get("bandwidthburst", "")
@@ -3024,7 +3048,7 @@ class TorMonitorApp:
             pass
 
         # Coalesced graph redraw — at most once per 50 ms poll tick.
-        _dash = getattr(self, "_dash", None)
+        _dash = getattr(self, "dashboard", None)
         if _dash is not None and _dash._graph_dirty:
             _dash._redraw_graph()
             _dash._graph_dirty = False

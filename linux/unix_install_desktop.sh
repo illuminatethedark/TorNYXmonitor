@@ -211,7 +211,7 @@ echo "  [✓] launch.sh marked executable"
 # ─────────────────────────────────────────────────────────────────────────────
 #  Step 4 — Write .desktop file with absolute paths
 # ─────────────────────────────────────────────────────────────────────────────
-ICON="$APP_ROOT/icon.ico"
+ICON="$APP_ROOT/icon.png"
 
 cat > "$SCRIPT_DIR/$DEST_NAME" <<EOF
 [Desktop Entry]
