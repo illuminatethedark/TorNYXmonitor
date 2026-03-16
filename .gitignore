@@ -1,0 +1,48 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# ── PyInstaller ───────────────────────────────────────────────────────────────
+*.spec
+dist/
+build/
+
+# ── User config / secrets (never commit) ─────────────────────────────────────
+.tor_bridge_monitor.json
+.tor_bridge_monitor.json.tmp
+.tor_bridge_monitor_known_hosts
+.tor_bridge_monitor.log
+.tor_bridge_monitor.log.*
+
+# ── IDEs / editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ── OS artefacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Archive (local only — old versions, not part of the repo) ────────────────
+Archive/
