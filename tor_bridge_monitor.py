@@ -1,5 +1,5 @@
 """
-Tor NYX Monitor v0.2.1
+Tor NYX Monitor v0.2.2
 ======================================
 Two worker threads (SSH + Tor control port) post events onto a single queue.
 The main tkinter thread drains that queue every 50 ms and updates the UI.
@@ -142,8 +142,8 @@ def save_config(cfg: dict):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(to_save, f, indent=2)
         os.replace(tmp, CONFIG_FILE)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.error("save_config failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,8 +157,8 @@ def load_profiles() -> dict:
                 data = json.load(fh)
             if data.get("encrypted") or isinstance(data.get("profiles"), dict):
                 return data
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("load_profiles failed (corrupt file?): %s", exc)
     return {"version": 1, "encrypted": False, "profiles": {}, "last": ""}
 
 
@@ -783,6 +783,8 @@ class CtrlWorker(threading.Thread):
             pass
 
     def _send(self, line: str):
+        if self._sock is None:
+            raise OSError("control socket is not connected")
         self._sock.sendall((line + "\r\n").encode())
 
     def _read_cookie(self, cookie_path: str) -> str:
@@ -1425,6 +1427,7 @@ class DashboardPanel(tk.Frame):
         self._conn_sig_last  = None    # fingerprint of last rendered conn list
         self._conn_sort      = "direction"  # active sort: direction|status|name|none
         self._graph_mode  = "Bandwidth"   # "Bandwidth" | "Connections" | "Resources"
+        self._graph_dirty = False          # coalesces push_bw() redraws to one per poll tick
         self._build()
 
     # ── font helper ─────────────────────────────────────────────────────────
@@ -1726,9 +1729,9 @@ class DashboardPanel(tk.Frame):
         if self._graph_mode == "Bandwidth":
             self._lbl_read.config(text=f"↓  {fmt_bytes(read_b)}/s")
             self._lbl_write.config(text=f"↑  {fmt_bytes(written_b)}/s")
-        # BW events fire every second — use them to clock redraws for all
-        # graph modes so Connections and Resources stay visually live.
-        self._redraw_graph()
+        # BW events fire every second — set a dirty flag so the main poll
+        # loop redraws once per 50 ms tick regardless of BW event rate.
+        self._graph_dirty = True
 
     def push_identity(self, d: dict):
         self._identity = d
@@ -1918,6 +1921,14 @@ class DashboardPanel(tk.Frame):
             self._lbl_write.config(text="✗  failed: 0")
         self._lbl_bw_max.config(text="")
         self._redraw_graph()
+
+        # Immediately populate buffered data so the new view is live on switch.
+        if mode == "Connections" and self._last_conns:
+            self._conn_sig_last = None        # force list rebuild from cache
+            self.push_connections(self._last_conns)
+        elif mode == "Resources":
+            self._lbl_read.config(text=f"✓  built: {self._circ_built}")
+            self._lbl_write.config(text=f"✗  failed: {self._circ_failed}")
 
     # ── sparkline ─────────────────────────────────────────────────────────
     def _redraw_graph(self):
@@ -2282,6 +2293,12 @@ class TorMonitorApp:
             activebackground="#6d28d9", activeforeground="white",
             padx=8, pady=0, command=self._restart_tor)
         # Shown only when ctrl port is down — hidden by default
+        self._maintenance_btn = tk.Button(
+            bar, text="⬆ Update System", font=small,
+            bg=self.BORDER, fg=self.TEXT_DIM, bd=0, cursor="hand2",
+            activebackground=self.ACCENT, activeforeground="white",
+            padx=8, pady=0, command=self._run_maintenance)
+        # Shown when SSH is connected — hidden by default
         self.statusbar = tk.Label(bar, font=small, fg=self.TEXT_DIM,
                                    bg=self.PANEL,
                                    text="Enter SSH credentials and click Connect")
@@ -2429,9 +2446,9 @@ class TorMonitorApp:
     #  Connection profile management
     # ─────────────────────────────────────────────────────────────────────────
     def _refresh_profile_combo(self, select: str = ""):
-        """Rebuild the profile combobox values and optionally pre-select one."""
+        """Rebuild the profile list and optionally pre-select one."""
         names = sorted(self._profiles_data.get("profiles", {}).keys())
-        self._profile_combo["values"] = names
+        self._profile_names = names
         if select and select in names:
             self.profile_var.set(select)
         elif names:
@@ -2446,6 +2463,94 @@ class TorMonitorApp:
             return
         self.profile_name_var.set(name)
         self._populate_from_profile(name)
+
+    def _show_profile_menu(self):
+        """Open a custom flat dropdown to select a saved connection profile."""
+        names = self._profile_names
+        if not names:
+            return
+
+        menu = tk.Toplevel(self.root)
+        menu.overrideredirect(True)
+        menu.configure(bg=self.BORDER)
+        menu.attributes("-topmost", True)
+
+        btn = self._profile_btn
+        bx  = btn.winfo_rootx()
+        by  = btn.winfo_rooty() + btn.winfo_height() + 2
+        bw  = btn.winfo_width()
+        menu.geometry(f"{bw}x1+{bx}+{by}")   # width matches button; height set after fill
+
+        _selected = [False]
+
+        def _dismiss(e=None):
+            if _selected[0]:
+                return
+            try:
+                menu.destroy()
+            except Exception:
+                pass
+            try:
+                self.root.unbind("<Button-1>", _dismiss_id[0])
+            except Exception:
+                pass
+
+        _dismiss_id = [None]
+        def _bind_dismiss():
+            _dismiss_id[0] = self.root.bind("<Button-1>",
+                lambda e: _dismiss() if not _menu_contains(e.x_root, e.y_root) else None,
+                add="+")
+        menu.after(1, _bind_dismiss)
+
+        def _menu_contains(rx, ry):
+            try:
+                mx = menu.winfo_rootx(); my = menu.winfo_rooty()
+                mw = menu.winfo_width(); mh = menu.winfo_height()
+                return mx <= rx <= mx + mw and my <= ry <= my + mh
+            except Exception:
+                return False
+
+        menu.bind("<Escape>", _dismiss)
+        menu.bind("<FocusOut>", lambda e: menu.after(50, lambda: _dismiss()
+                                                     if not _menu_contains(
+                                                         self.root.winfo_pointerx(),
+                                                         self.root.winfo_pointery()) else None))
+
+        current = self.profile_var.get()
+        small   = self._font(["Segoe UI", "Arial"], self._sf(9))
+
+        for name in names:
+            active = (name == current)
+            bg_row = self.ACCENT if active else self.PANEL
+            fg_lbl = "white"     if active else self.TEXT
+
+            row = tk.Frame(menu, bg=bg_row, cursor="hand2")
+            row.pack(fill="x", padx=1, pady=1)
+            lw  = tk.Label(row, text=f"  {name}", font=small,
+                           fg=fg_lbl, bg=bg_row, anchor="w", padx=6, pady=5)
+            lw.pack(fill="x")
+
+            def _go(n=name, mn=menu):
+                _selected[0] = True
+                try:
+                    self.root.unbind("<Button-1>", _dismiss_id[0])
+                except Exception:
+                    pass
+                mn.destroy()
+                self.profile_var.set(n)
+                self._on_profile_select()
+
+            for w in (row, lw):
+                w.bind("<Button-1>", lambda e, fn=_go: fn())
+                if not active:
+                    w.bind("<Enter>", lambda e, r=row, l=lw:
+                           [x.config(bg=self.BORDER) for x in (r, l)])
+                    w.bind("<Leave>", lambda e, r=row, l=lw, bg=bg_row:
+                           [x.config(bg=bg) for x in (r, l)])
+
+        menu.update_idletasks()
+        menu.geometry(f"{bw}x{menu.winfo_reqheight()}+{bx}+{by}")
+        menu.focus_set()
 
     def _populate_from_profile(self, name: str):
         """Fill all sidebar connection fields from a saved profile."""
@@ -2781,27 +2886,24 @@ class TorMonitorApp:
         # ── profiles section ──────────────────────────────────────────────────
         section("PROFILES")
 
-        # Dark style for the combobox widget itself
-        _cs = ttk.Style()
-        _cs.configure("Profile.TCombobox",
-                       fieldbackground="#090b10", background=self.BORDER,
-                       foreground=self.TEXT, arrowcolor=self.TEXT_DIM,
-                       selectbackground=self.ACCENT, selectforeground="white",
-                       borderwidth=0, relief="flat")
-        _cs.map("Profile.TCombobox",
-                fieldbackground=[("readonly", "#090b10")],
-                foreground=[("readonly", self.TEXT)],
-                background=[("readonly", self.BORDER),
-                             ("active",   self.BORDER)])
+        # Custom flat profile selector (replaces ttk.Combobox for consistent theming)
+        self.profile_var   = tk.StringVar()
+        self._profile_names = []
+        self._profile_btn  = tk.Button(
+            sidebar, text="  — select profile —  ▾",
+            font=small,
+            bg="#090b10", fg=self.TEXT,
+            activebackground=self.BORDER, activeforeground=self.TEXT,
+            bd=0, relief="flat", cursor="hand2",
+            anchor="w", padx=8, pady=4,
+            command=self._show_profile_menu)
+        self._profile_btn.pack(fill="x", padx=14, pady=(0, 4))
 
-        # Select existing profile
-        self.profile_var = tk.StringVar()
-        self._profile_combo = ttk.Combobox(
-            sidebar, textvariable=self.profile_var,
-            state="readonly", font=small, style="Profile.TCombobox")
-        self._profile_combo.pack(fill="x", padx=14, pady=(0, 4))
-        self._profile_combo.bind("<<ComboboxSelected>>",
-                                  self._on_profile_select)
+        def _sync_profile_btn(*_):
+            name = self.profile_var.get()
+            self._profile_btn.config(
+                text=f"  {name}  ▾" if name else "  — select profile —  ▾")
+        self.profile_var.trace_add("write", _sync_profile_btn)
 
         # Name entry + Save button on the same row
         _pn_row = tk.Frame(sidebar, bg=self.PANEL)
@@ -2920,6 +3022,12 @@ class TorMonitorApp:
                 self._handle(msg[1:])
         except queue.Empty:
             pass
+
+        # Coalesced graph redraw — at most once per 50 ms poll tick.
+        if self._dash is not None and self._dash._graph_dirty:
+            self._dash._redraw_graph()
+            self._dash._graph_dirty = False
+
         # Guard against rescheduling after root.destroy() has been queued
         # from the background join thread — winfo_exists() is False by then.
         try:
@@ -3012,6 +3120,8 @@ class TorMonitorApp:
                 self._ssh_retry_id = None
             self._ssh_retry_count = 0
             self._ui_log(f"SSH ready — mode: {mode}", "ok")
+            self._maintenance_btn.pack(side="right", padx=(0, 4), pady=3,
+                                       before=self._log_toggle_btn)
             if mode == "shell":
                 # Shell mode: overlay done, switch to terminal view.
                 self._set_status("connected",
@@ -3372,6 +3482,71 @@ class TorMonitorApp:
 
         self._run_ssh_cmd("sudo systemctl restart tor", on_done=_done_restart)
 
+    def _run_maintenance(self):
+        """Run apt update && apt upgrade on the remote host, streaming output to the debug log.
+
+        Uses a daemon thread with exec_command so the UI never blocks.  Output
+        is posted line-by-line via root.after() so the log scrolls in real time.
+        The button is disabled for the duration to prevent double-invocation.
+        """
+        if not self._ssh or not self._ssh.client:
+            self._ui_log("Cannot run update: SSH not connected", "warn")
+            return
+
+        client = self._ssh.client
+        self._maintenance_btn.config(state="disabled", text="⬆ Updating…")
+        self._ui_log("Starting system update (apt update && apt upgrade)…", "info")
+
+        def _worker():
+            try:
+                transport = client.get_transport()
+                if transport is None or not transport.is_active():
+                    raise OSError("SSH transport is no longer active")
+                chan = transport.open_session()
+                chan.exec_command(
+                    "DEBIAN_FRONTEND=noninteractive sudo apt-get update -y"
+                    " && DEBIAN_FRONTEND=noninteractive sudo apt-get upgrade -y"
+                    " 2>&1")
+                buf = b""
+                while True:
+                    chunk = chan.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    # Flush complete lines as they arrive
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        text = line.decode(errors="replace").rstrip("\r")
+                        if text:
+                            self.root.after(0, self._ui_log, text, "info")
+                # Flush any remaining partial line
+                if buf:
+                    text = buf.decode(errors="replace").rstrip("\r\n")
+                    if text:
+                        self.root.after(0, self._ui_log, text, "info")
+                rc = chan.recv_exit_status()
+                chan.close()
+                ok = (rc == 0)
+            except Exception as exc:
+                ok = False
+                self.root.after(0, self._ui_log,
+                                f"System update error: {exc}", "warn")
+
+            def _finish():
+                if ok:
+                    self._ui_log("System update completed successfully ✓", "ok")
+                else:
+                    self._ui_log("System update finished with errors — check output above",
+                                 "warn")
+                try:
+                    self._maintenance_btn.config(state="normal", text="⬆ Update System")
+                except Exception:
+                    pass
+
+            self.root.after(0, _finish)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_disconnected(self):
         self.dashboard.reset()
         self.dashboard.reset_layout()
@@ -3387,6 +3562,7 @@ class TorMonitorApp:
         self._set_status("disconnected", "Disconnected")
         self._ui_log("Disconnected", "warn")
         self._restart_tor_btn.pack_forget()
+        self._maintenance_btn.pack_forget()
         if self._view_mode == "terminal":
             self._toggle_view()
         self._show_splash()
@@ -3536,7 +3712,7 @@ class TorMonitorApp:
                  fg=self.TEXT_DIM, bg=self.BG, anchor="w").pack(side="left")
 
         tk.Label(col,
-                 text="This may take up to 20 s while nyx initializes",
+                 text="This may take up to 30 s while nyx initializes",
                  font=self._font(["Segoe UI","Arial"], self._sf(8)),
                  fg=self.TEXT_DIM, bg=self.BG).pack(pady=(0, 8))
 
