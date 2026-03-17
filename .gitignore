@@ -24,6 +24,7 @@ build/
 .tor_bridge_monitor.log.*
 
 # ── IDEs / editors ────────────────────────────────────────────────────────────
+.claude/
 .vscode/
 .idea/
 *.sublime-project
