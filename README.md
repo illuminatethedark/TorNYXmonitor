@@ -130,7 +130,6 @@ python tor_bridge_monitor.py
    ```
    Or use the launcher script directly:
    ```bash
-   chmod +x linux/launch.sh
    ./linux/launch.sh
    ```
 
@@ -138,7 +137,6 @@ python tor_bridge_monitor.py
 
 Run the installer once from the app folder:
 ```bash
-chmod +x linux/unix_install_desktop.sh
 ./linux/unix_install_desktop.sh
 ```
 
@@ -158,7 +156,6 @@ A completion dialog confirms when setup is done.
 
 To fully uninstall (shortcuts, venv, data files, and app folder):
 ```bash
-chmod +x linux/unix_uninstall.sh
 ./linux/unix_uninstall.sh
 ```
 The uninstaller removes desktop shortcuts, the applications menu entry, the local
