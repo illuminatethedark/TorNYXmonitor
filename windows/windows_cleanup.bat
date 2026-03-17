@@ -7,12 +7,9 @@ echo  Tor NYX Monitor — Remove App Data
 echo ================================================
 echo.
 echo  This will delete:
+echo    - Tor NYX Monitor.exe from your Desktop
 echo    - Config and profile files from your user folder
-echo    - Desktop shortcut (if present)
 echo    - Saved passwords from Windows Credential Manager
-echo.
-echo  Your Tor NYX Monitor exe is NOT deleted.
-echo  Remove it manually once cleanup is complete.
 echo.
 set /p "_CONFIRM=  Continue? [Y/N]: "
 if /i not "!_CONFIRM!"=="Y" (
@@ -40,12 +37,12 @@ for %%f in (
 )
 if "!_REMOVED!"=="0" echo  [--] No data files found.
 
-:: ── Desktop shortcut ──────────────────────────────────────────────────
-if exist "%USERPROFILE%\Desktop\Tor NYX Monitor.lnk" (
-    del /q "%USERPROFILE%\Desktop\Tor NYX Monitor.lnk" 2>nul
-    echo  [OK] Deleted Desktop shortcut.
+:: ── Desktop exe ───────────────────────────────────────────────────────
+if exist "%USERPROFILE%\Desktop\Tor NYX Monitor.exe" (
+    del /q "%USERPROFILE%\Desktop\Tor NYX Monitor.exe" 2>nul
+    echo  [OK] Deleted Desktop exe.
 ) else (
-    echo  [--] No Desktop shortcut found.
+    echo  [--] Desktop exe not found.
 )
 
 :: ── Windows Credential Manager (keyring entries) ──────────────────────
@@ -58,8 +55,6 @@ echo  [OK] Credential Manager check complete.
 echo.
 echo ================================================
 echo  Cleanup complete.
-echo  Delete the Tor NYX Monitor exe manually to
-echo  finish removing the application.
 echo ================================================
 echo.
 pause

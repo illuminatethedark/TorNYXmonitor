@@ -173,17 +173,17 @@ Python venv, user config/data files, and the app folder itself. System packages
 ```bat
 windows\windows_build.bat
 ```
-Produces `dist\Tor NYX Monitor v0.2.4.exe` (~17 MB, single file).
+Produces `Tor NYX Monitor.exe` (~17 MB) placed directly on the Desktop.
 
 **No Python required** — if Python is not found in PATH, the build script
 automatically downloads the Python 3.12 full installer, uses it to run
 PyInstaller, then removes it. No system-wide PATH changes, no admin rights needed.
 
-To remove all app data after uninstalling the exe:
+To fully uninstall (exe, config files, saved passwords):
 ```bat
 windows\windows_cleanup.bat
 ```
-Deletes config files from `%USERPROFILE%`, the Desktop shortcut, and all saved
+Deletes the Desktop exe, config files from `%USERPROFILE%`, and all saved
 passwords from Windows Credential Manager.
 
 ### Linux (PyInstaller)
@@ -260,8 +260,8 @@ platform-neutral. The only OS-specific code is:
 | Master password (AES-256-GCM) | ✓ | ✓ | ✓ |
 | OS credential store | DPAPI | SecretService / keyring | Keychain |
 | Dark title bar | ✓ | — | — |
-| `.exe` build via `windows/windows_build.bat` | ✓ | — | — |
-| Cleanup script | `windows/windows_cleanup.bat` | `linux/unix_uninstall.sh` | — |
+| `.exe` build → Desktop via `windows/windows_build.bat` | ✓ | — | — |
+| Cleanup / uninstall | `windows/windows_cleanup.bat` | `linux/unix_uninstall.sh` | — |
 
 ---
 

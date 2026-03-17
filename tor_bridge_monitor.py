@@ -1430,6 +1430,12 @@ class DashboardPanel(tk.Frame):
         self._graph_dirty = False          # coalesces push_bw() redraws to one per poll tick
         self._canvas_w    = 600            # cached from <Configure>; used by _canvas_base()
         self._canvas_h    = 110            # fallback until first Configure event fires
+        # Current-state vars sampled into history by push_bw() every ~1 s
+        self._curr_n      = 0
+        self._curr_n_in   = 0
+        self._curr_n_out  = 0
+        self._pending_circ_b = 0          # circuit deltas accumulated since last BW tick
+        self._pending_circ_f = 0
         self._uptime_base      = None      # int seconds from last GETINFO uptime
         self._uptime_polled_at = None      # time.monotonic() at that poll
         self._uptime_tick_id   = None      # after() id for the 1-second ticker
@@ -1735,6 +1741,15 @@ class DashboardPanel(tk.Frame):
         if self._graph_mode == "Bandwidth":
             self._lbl_read.config(text=f"↓  {fmt_bytes(read_b)}/s")
             self._lbl_write.config(text=f"↑  {fmt_bytes(written_b)}/s")
+        # Advance connection and circuit histories at ~1 Hz so those graph
+        # modes scroll continuously even when no new events have arrived.
+        self._conn_hist.append(self._curr_n)
+        self._conn_in_hist.append(self._curr_n_in)
+        self._conn_out_hist.append(self._curr_n_out)
+        self._circ_built_hist.append(self._pending_circ_b)
+        self._circ_failed_hist.append(self._pending_circ_f)
+        self._pending_circ_b = 0
+        self._pending_circ_f = 0
         # BW events fire every second — set a dirty flag so the main poll
         # loop redraws once per 50 ms tick regardless of BW event rate.
         self._graph_dirty = True
@@ -1748,17 +1763,14 @@ class DashboardPanel(tk.Frame):
         self._refresh_identity()
 
     def push_circs(self, built: int, failed: int):
-        # Store per-event deltas, not cumulative totals.  Cumulative values
-        # cause the history to fill with near-identical large numbers, making
-        # the graph appear flat regardless of circuit activity.
+        # Accumulate deltas into pending buckets; push_bw() flushes them into
+        # the history deque every ~1 s so the Resources graph scrolls at 1 Hz.
         delta_b = max(0, built  - self._circ_built)
         delta_f = max(0, failed - self._circ_failed)
         self._circ_built  = built
         self._circ_failed = failed
-        self._circ_built_hist.append(delta_b)
-        self._circ_failed_hist.append(delta_f)
-        if self._graph_mode == "Resources":
-            self._redraw_graph()
+        self._pending_circ_b += delta_b
+        self._pending_circ_f += delta_f
 
     @staticmethod
     def _conn_sig(conns: list) -> tuple:
@@ -1774,12 +1786,11 @@ class DashboardPanel(tk.Frame):
         n_in  = sum(1 for c in conns if c.get("direction") == "in")
         n_out = sum(1 for c in conns if c.get("direction") == "out")
 
-        # Always update history deques and graph regardless of widget state.
-        self._conn_hist.append(n)
-        self._conn_in_hist.append(n_in)
-        self._conn_out_hist.append(n_out)
-        if self._graph_mode == "Connections":
-            self._redraw_graph()
+        # Update current-state vars; push_bw() samples these into the history
+        # deque every ~1 s so the Connections graph scrolls at 1 Hz.
+        self._curr_n     = n
+        self._curr_n_in  = n_in
+        self._curr_n_out = n_out
 
         # Skip the expensive destroy-and-recreate cycle when visible data
         # hasn't changed. ORCONN events fire on every state transition and
@@ -1883,6 +1894,8 @@ class DashboardPanel(tk.Frame):
         self._ema_r = self._ema_w = self._peak = 0.0
         self._identity    = {}
         self._circ_built  = self._circ_failed = 0
+        self._curr_n = self._curr_n_in = self._curr_n_out = 0
+        self._pending_circ_b = self._pending_circ_f = 0
         self._last_conns     = []
         self._conn_sig_last  = None
         self._lbl_read.config(text="↓  0 B/s")

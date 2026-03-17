@@ -1,9 +1,9 @@
 @echo off
-title Tor NYX Monitor v0.2.4 - Build EXE
+title Tor NYX Monitor - Build EXE
 setlocal enabledelayedexpansion
 
 echo ================================================
-echo  Tor NYX Monitor v0.2.4 - EXE Builder
+echo  Tor NYX Monitor - EXE Builder
 echo ================================================
 echo.
 
@@ -111,7 +111,7 @@ if exist "%ROOT_DIR%\icon.ico" (
     echo  Using icon: %ROOT_DIR%\icon.ico
 )
 
-:: ── Build the exe (output goes to root dist\ and build\) ──────────────
+:: ── Build the exe (output goes directly to Desktop) ──────────────────
 echo.
 echo [3/4] Building executable...
 echo        This may take a minute...
@@ -119,8 +119,8 @@ echo.
 "!PYTHON_EXE!" -m PyInstaller ^
     --onefile ^
     --windowed ^
-    --name "Tor NYX Monitor v0.2.4" ^
-    --distpath "%ROOT_DIR%\dist" ^
+    --name "Tor NYX Monitor" ^
+    --distpath "%USERPROFILE%\Desktop" ^
     --workpath "%ROOT_DIR%\build" ^
     --specpath "%ROOT_DIR%" ^
     !ICON_ARG! ^
@@ -172,11 +172,11 @@ if errorlevel 1 (
 :: ── Verify output ─────────────────────────────────────────────────────
 echo.
 echo [4/4] Verifying output...
-if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe" (
-    echo        SUCCESS: dist\Tor NYX Monitor v0.2.4.exe created.
-    for %%i in ("%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe") do echo        Size: %%~zi bytes
+if exist "%USERPROFILE%\Desktop\Tor NYX Monitor.exe" (
+    echo        SUCCESS: Tor NYX Monitor.exe placed on Desktop.
+    for %%i in ("%USERPROFILE%\Desktop\Tor NYX Monitor.exe") do echo        Size: %%~zi bytes
 ) else (
-    echo  ERROR: exe not found in dist\ folder.
+    echo  ERROR: exe not found on Desktop.
     pause & exit /b 1
 )
 
@@ -184,32 +184,18 @@ if exist "%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe" (
 echo.
 echo        Cleaning up build files...
 if exist "%ROOT_DIR%\build"                         rmdir /s /q "%ROOT_DIR%\build"
-if exist "%ROOT_DIR%\Tor NYX Monitor v0.2.4.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor v0.2.4.spec"
+if exist "%ROOT_DIR%\Tor NYX Monitor.spec"  del /q "%ROOT_DIR%\Tor NYX Monitor.spec"
 if "!_PYTHON_BOOTSTRAPPED!"=="1" (
     echo        Removing bootstrapped Python...
     rmdir /s /q "!BOOTSTRAP_PYTHON_DIR!" 2>nul
 )
 echo        Done.
 
-:: ── Optional: create Desktop shortcut ────────────────────────────────
-echo.
-set /p "_CREATE_SC=  Create a Desktop shortcut for the built exe? [Y/N]: "
-if /i "!_CREATE_SC!"=="Y" (
-    set "SC_TARGET=%ROOT_DIR%\dist\Tor NYX Monitor v0.2.4.exe"
-    set "SC_LINK=%USERPROFILE%\Desktop\Tor NYX Monitor.lnk"
-    set "SC_ICON=%ROOT_DIR%\icon.ico"
-    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $sc=$s.CreateShortcut('!SC_LINK!'); $sc.TargetPath='!SC_TARGET!'; $sc.IconLocation='!SC_ICON!'; $sc.Description='Monitor a remote Tor relay over SSH'; $sc.WorkingDirectory='!ROOT_DIR!\dist'; $sc.Save()"
-    if exist "!SC_LINK!" (
-        echo   [OK] Desktop shortcut created.
-    ) else (
-        echo   [!] Shortcut creation failed — create it manually if needed.
-    )
-)
-
 echo.
 echo ================================================
 echo  Build complete!
-echo  Your exe is at:  dist\Tor NYX Monitor v0.2.4.exe
+echo  Your exe is on the Desktop:
+echo    Tor NYX Monitor.exe
 echo.
 echo  NOTE: Windows SmartScreen may warn on first run
 echo  because the exe is unsigned. Click "More info"
