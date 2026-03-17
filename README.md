@@ -1,7 +1,9 @@
 # Tor NYX Monitor  v0.2.4
 
-A desktop application for monitoring a remote Tor relay over SSH.
-Runs on **Windows, Linux, and macOS**.
+An elegant desktop application for monitoring a remote Tor relay over SSH.
+Runs on **Windows, Linux, and macOS**. NOTE: Due to loss of power adapters,
+this has not yet been tested on an Apple device. I have high hopes for the
+future, however.
 Connects to a Raspberry Pi (or any Linux host) running Tor, launches **nyx**
 inside a PTY, streams the terminal to a canvas widget, and exposes a live
 dashboard fed by the Tor control port.
@@ -115,6 +117,37 @@ windows\windows_cleanup.bat
 Deletes the Desktop exe, config files from `%USERPROFILE%`, and all saved
 passwords from Windows Credential Manager.
 
+### Linux — Desktop installer (launchable icon)
+
+Run the installer once from the app folder:
+```bash
+./linux/unix_install_desktop.sh
+```
+
+The installer handles everything in one step:
+
+1. **System packages** — detects your package manager (`apt` / `dnf` / `pacman`),
+   shows a confirmation dialog listing what will be installed, then prompts for
+   your password via a GUI window (`pkexec` / `zenity`) to install
+   `python3`, `python3-tk`, and `python3-venv` if any are missing
+2. **Python dependencies** — creates a local `venv/` in the app folder and
+   installs `paramiko` and `pyte` into it (no sudo required)
+3. **Desktop shortcut** — writes `tor_bridge_monitor.desktop` with absolute
+   paths, registers it in `~/.local/share/applications/` (applications menu),
+   and places a trusted, clickable icon on `~/Desktop` if the folder exists
+
+A completion dialog confirms when setup is done.
+
+To fully uninstall (shortcuts, venv, data files, and app folder):
+```bash
+./linux/unix_uninstall.sh
+```
+The uninstaller removes desktop shortcuts, the applications menu entry, the local
+Python venv, user config/data files, and the app folder itself. System packages
+(`python3`, `python3-tk`) are left in place as they may be shared.
+
+---
+
 ### Linux (PyInstaller)
 
 1. Install PyInstaller and all dependencies:
@@ -169,36 +202,6 @@ passwords from Windows Credential Manager.
 > **Note:** Some distributions require `python3-tk` to be installed system-wide
 > even when using a virtualenv — it cannot be installed via pip.
 
-### Linux — Desktop installer (launchable icon)
-
-Run the installer once from the app folder:
-```bash
-./linux/unix_install_desktop.sh
-```
-
-The installer handles everything in one step:
-
-1. **System packages** — detects your package manager (`apt` / `dnf` / `pacman`),
-   shows a confirmation dialog listing what will be installed, then prompts for
-   your password via a GUI window (`pkexec` / `zenity`) to install
-   `python3`, `python3-tk`, and `python3-venv` if any are missing
-2. **Python dependencies** — creates a local `venv/` in the app folder and
-   installs `paramiko` and `pyte` into it (no sudo required)
-3. **Desktop shortcut** — writes `tor_bridge_monitor.desktop` with absolute
-   paths, registers it in `~/.local/share/applications/` (applications menu),
-   and places a trusted, clickable icon on `~/Desktop` if the folder exists
-
-A completion dialog confirms when setup is done.
-
-To fully uninstall (shortcuts, venv, data files, and app folder):
-```bash
-./linux/unix_uninstall.sh
-```
-The uninstaller removes desktop shortcuts, the applications menu entry, the local
-Python venv, user config/data files, and the app folder itself. System packages
-(`python3`, `python3-tk`) are left in place as they may be shared.
-
----
 
 ## Running
 
