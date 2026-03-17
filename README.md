@@ -96,74 +96,6 @@ sudo cat /var/run/tor/control.authcookie   # for cookie auth
 
 ---
 
-## Running
-
-### Windows
-```bat
-python tor_bridge_monitor.py
-```
-
-### Linux / macOS
-
-1. Install system dependencies (if not already present):
-   ```bash
-   # Debian / Ubuntu
-   sudo apt update
-   sudo apt install python3 python3-pip python3-tk
-
-   # Fedora
-   sudo dnf install python3 python3-pip python3-tkinter
-
-   # Arch
-   sudo pacman -S python python-pip tk
-   ```
-
-2. Install Python dependencies:
-   ```bash
-   pip install paramiko pyte
-   # Optional: pip install cryptography
-   ```
-
-3. Run:
-   ```bash
-   python3 tor_bridge_monitor.py
-   ```
-   Or use the launcher script directly:
-   ```bash
-   ./linux/launch.sh
-   ```
-
-### Linux — Desktop shortcut (launchable icon)
-
-Run the installer once from the app folder:
-```bash
-./linux/unix_install_desktop.sh
-```
-
-The installer handles everything in one step:
-
-1. **System packages** — detects your package manager (`apt` / `dnf` / `pacman`),
-   shows a confirmation dialog listing what will be installed, then prompts for
-   your password via a GUI window (`pkexec` / `zenity`) to install
-   `python3`, `python3-tk`, and `python3-venv` if any are missing
-2. **Python dependencies** — creates a local `venv/` in the app folder and
-   installs `paramiko` and `pyte` into it (no sudo required)
-3. **Desktop shortcut** — writes `tor_bridge_monitor.desktop` with absolute
-   paths, registers it in `~/.local/share/applications/` (applications menu),
-   and places a trusted, clickable icon on `~/Desktop` if the folder exists
-
-A completion dialog confirms when setup is done.
-
-To fully uninstall (shortcuts, venv, data files, and app folder):
-```bash
-./linux/unix_uninstall.sh
-```
-The uninstaller removes desktop shortcuts, the applications menu entry, the local
-Python venv, user config/data files, and the app folder itself. System packages
-(`python3`, `python3-tk`) are left in place as they may be shared.
-
----
-
 ## Building
 
 ### Windows
@@ -236,6 +168,74 @@ passwords from Windows Credential Manager.
 
 > **Note:** Some distributions require `python3-tk` to be installed system-wide
 > even when using a virtualenv — it cannot be installed via pip.
+
+### Linux — Desktop installer (launchable icon)
+
+Run the installer once from the app folder:
+```bash
+./linux/unix_install_desktop.sh
+```
+
+The installer handles everything in one step:
+
+1. **System packages** — detects your package manager (`apt` / `dnf` / `pacman`),
+   shows a confirmation dialog listing what will be installed, then prompts for
+   your password via a GUI window (`pkexec` / `zenity`) to install
+   `python3`, `python3-tk`, and `python3-venv` if any are missing
+2. **Python dependencies** — creates a local `venv/` in the app folder and
+   installs `paramiko` and `pyte` into it (no sudo required)
+3. **Desktop shortcut** — writes `tor_bridge_monitor.desktop` with absolute
+   paths, registers it in `~/.local/share/applications/` (applications menu),
+   and places a trusted, clickable icon on `~/Desktop` if the folder exists
+
+A completion dialog confirms when setup is done.
+
+To fully uninstall (shortcuts, venv, data files, and app folder):
+```bash
+./linux/unix_uninstall.sh
+```
+The uninstaller removes desktop shortcuts, the applications menu entry, the local
+Python venv, user config/data files, and the app folder itself. System packages
+(`python3`, `python3-tk`) are left in place as they may be shared.
+
+---
+
+## Running
+
+### Windows (shell launch directly in python)
+```bat
+python tor_bridge_monitor.py
+```
+
+### Linux / macOS (manual installation+run)
+
+1. Install system dependencies (if not already present):
+   ```bash
+   # Debian / Ubuntu
+   sudo apt update
+   sudo apt install python3 python3-pip python3-tk
+
+   # Fedora
+   sudo dnf install python3 python3-pip python3-tkinter
+
+   # Arch
+   sudo pacman -S python python-pip tk
+   ```
+
+2. Install Python dependencies:
+   ```bash
+   pip install paramiko pyte
+   # Optional: pip install cryptography
+   ```
+
+3. Run:
+   ```bash
+   python3 tor_bridge_monitor.py
+   ```
+   Or use the launcher script directly:
+   ```bash
+   ./linux/launch.sh
+   ```
 
 ---
 
