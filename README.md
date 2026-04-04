@@ -1,4 +1,4 @@
-# Tor NYX Monitor  v0.2.4
+# Tor NYX Monitor  v0.2.5
 
 An elegant desktop application for monitoring a remote Tor relay over SSH.
 Runs on **Windows, Linux, and macOS**. NOTE: Due to loss of power adapters,
@@ -292,6 +292,18 @@ CtrlWorker ──┘
 ---
 
 ## Changelog
+
+### v0.2.5
+Bugs squashed
+- **Control port suppressed during system update** — `ctrl_down` no longer
+  triggers the reconnect retry loop while `apt dist-upgrade` is running,
+  preventing a spurious `_restart_tor` call mid-update
+- **Update completion overlay** — after apt finishes, the overlay now switches
+  to a "UPDATE COMPLETE ✓" (or error) state with an OK button; auto-dismisses
+  after 6 s if unattended
+- **Control port reconnects after update** — dismissing the completion overlay
+  resets retry counters and schedules a fresh control-port reconnect, so the
+  dashboard comes back without manual intervention
 
 ### v0.2.4
 - **Graph render fix** — graphs were not repainting during active sessions; root

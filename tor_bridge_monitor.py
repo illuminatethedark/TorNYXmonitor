@@ -1,5 +1,5 @@
 """
-Tor NYX Monitor v0.2.4
+Tor NYX Monitor v0.2.5
 ======================================
 Two worker threads (SSH + Tor control port) post events onto a single queue.
 The main tkinter thread drains that queue every 50 ms and updates the UI.
@@ -14,7 +14,7 @@ Requirements:
 # ─────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 import base64
 import collections
@@ -583,9 +583,16 @@ class SSHWorker(threading.Thread):
             self._post("status", "connecting", f"Connected to {host} — opening terminal…")
 
             transport      = self.client.get_transport()
-            # Send SSH keepalives every 30 s so the server never drops an
-            # idle transport (fixes disconnects caused by sshd ClientAliveInterval).
-            transport.set_keepalive(30)
+            # SSH-level keepalives every 10 s — prevents NAT/firewall idle drops
+            # and sshd ClientAliveInterval timeouts.
+            transport.set_keepalive(10)
+            # Also enable TCP-level socket keepalive as a second redundant layer.
+            try:
+                import socket as _socket
+                raw = transport.sock
+                raw.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+            except Exception:
+                pass
             self._channel  = transport.open_session()
             self._channel.get_pty(term="xterm-256color",
                                    width=self.cols, height=self.rows)
@@ -726,8 +733,8 @@ class SSHWorker(threading.Thread):
             except OSError:
                 break
             except Exception as e:
-                _log.error("Read loop error: %s", e)
-                break
+                _log.warning("Read loop non-fatal error: %s", e)
+                continue
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -739,7 +746,7 @@ class SSHWorker(threading.Thread):
 # ─────────────────────────────────────────────────────────────────────────────
 class CtrlWorker(threading.Thread):
 
-    POLL_INTERVAL  = 30   # full identity + connections re-poll interval (s)
+    POLL_INTERVAL  = 5    # full identity + connections re-poll interval (s)
     RETRY_INTERVAL = 8    # retry if fingerprint missing (Tor bootstrapping)
     ORCONN_DEBOUNCE = 1.0 # seconds to coalesce ORCONN events before polling
 
@@ -1051,6 +1058,33 @@ class CtrlWorker(threading.Thread):
         # STREAM / ADDRMAP / anything else — forward to event log
         self._post("event", line[4:])
 
+    # ── auth diagnostics ────────────────────────────────────────────────────
+    def _diagnose_auth_failure(self, transport) -> list[str]:
+        """Run live checks and return only the problems actually found."""
+        hints = []
+        try:
+            chan = transport.open_session()
+            chan.exec_command(
+                "grep -qE '^[[:space:]]*ControlPort[[:space:]]+9051' /etc/tor/torrc"
+                " && echo CP_OK || echo CP_MISSING;"
+                "grep -qE '^[[:space:]]*CookieAuthentication[[:space:]]+1' /etc/tor/torrc"
+                " && echo CA_OK || echo CA_MISSING;"
+                "id -Gn | grep -qw debian-tor && echo GRP_OK || echo GRP_MISSING",
+                timeout=6)
+            out = chan.recv(4096).decode(errors="replace")
+            chan.close()
+            if "CP_MISSING"  in out:
+                hints.append("torrc missing 'ControlPort 9051'")
+            if "CA_MISSING"  in out:
+                hints.append("torrc missing 'CookieAuthentication 1'")
+            if "GRP_MISSING" in out:
+                user = self.client.get_transport().get_username() or "<user>"
+                hints.append(
+                    f"run: sudo usermod -aG debian-tor {user}")
+        except Exception as exc:
+            _log.debug("_diagnose_auth_failure: check failed: %s", exc)
+        return hints
+
     # ── main run ────────────────────────────────────────────────────────────
     def run(self):
         try:
@@ -1110,12 +1144,14 @@ class CtrlWorker(threading.Thread):
                            f"Control auth attempt {attempt+1}/3 failed")
 
             if not auth_ok:
-                self._post("status", "error",
-                    "Tor control auth failed after 3 attempts.\n"
-                    "Check torrc has 'ControlPort 9051' and "
-                    "'CookieAuthentication 1'.\n"
-                    "Also: sudo usermod -aG debian-tor <username>")
                 _log.error("Tor control auth failed")
+                hints = self._diagnose_auth_failure(transport)
+                if hints:
+                    self._post("status", "error",
+                        "Tor control auth failed — " + "  |  ".join(hints))
+                else:
+                    self._post("status", "error",
+                        "Tor control auth failed after 3 attempts")
                 return
 
             _log.info("Tor control authenticated")
@@ -1144,10 +1180,17 @@ class CtrlWorker(threading.Thread):
                         self._post("signal_result", cmd, ok, reply)
                         if ok and any(k in cmd for k in
                                       ("NEWNYM", "RELOAD", "CLEARDNSCACHE")):
-                            self._poll_identity()
-                            self._poll_connections()
+                            try:
+                                self._poll_identity()
+                                self._poll_connections()
+                            except OSError:
+                                raise   # re-raise so the outer except OSError breaks the loop
+                            except Exception as e:
+                                _log.warning("Post-command poll error: %s", e)
                 except queue.Empty:
                     pass
+                except OSError:
+                    break
 
                 # ── debounced ORCONN poll ────────────────────────────────────
                 now = time.time()
@@ -1155,21 +1198,36 @@ class CtrlWorker(threading.Thread):
                         now - last_orconn_event > self.ORCONN_DEBOUNCE:
                     self._orconn_dirty  = False
                     last_orconn_event   = now
-                    self._poll_connections()
+                    try:
+                        self._poll_connections()
+                    except OSError:
+                        break
+                    except Exception as e:
+                        _log.warning("ORCONN poll error: %s", e)
 
                 # ── retry if bootstrapping (no fingerprint yet) ──────────────
                 if not self._fp and now - last_retry > self.RETRY_INTERVAL:
                     last_retry = now
-                    self._poll_identity()
-                    self._poll_connections()
+                    try:
+                        self._poll_identity()
+                        self._poll_connections()
+                    except OSError:
+                        break
+                    except Exception as e:
+                        _log.warning("Bootstrap poll error: %s", e)
                     if self._fp:
                         last_poll = now   # align normal timer
 
                 # ── periodic full re-poll ────────────────────────────────────
                 if now - last_poll > self.POLL_INTERVAL:
                     last_poll = time.time()
-                    self._poll_identity()
-                    self._poll_connections()
+                    try:
+                        self._poll_identity()
+                        self._poll_connections()
+                    except OSError:
+                        break
+                    except Exception as e:
+                        _log.warning("Periodic poll error: %s", e)
 
                 # ── receive events ───────────────────────────────────────────
                 try:
@@ -1573,11 +1631,11 @@ class DashboardPanel(tk.Frame):
                         "name": "↕ Name", "none": "↕ Default"}
         self._conn_sort_btn = tk.Button(
             conn_hdr, text=_sort_labels[self._conn_sort],
-            font=self._fui_s, fg=self.TEXT_DIM, bg=self.BG,
-            relief="flat", bd=0, cursor="hand2",
-            activeforeground=self.ACCENT, activebackground=self.BG,
-            command=self._cycle_conn_sort)
-        self._conn_sort_btn.pack(side="right", padx=(0, 8))
+            font=self._fui_s, fg=self.TEXT, bg=self.BORDER,
+            bd=0, cursor="hand2",
+            activeforeground="white", activebackground=self.ACCENT,
+            padx=10, pady=2, command=self._show_conn_sort_menu)
+        self._conn_sort_btn.pack(side="right", padx=(0, 4))
 
         col_hdr = tk.Frame(conn_outer, bg=self.PANEL)
         col_hdr.pack(fill="x")
@@ -1772,10 +1830,9 @@ class DashboardPanel(tk.Frame):
         self._pending_circ_b += delta_b
         self._pending_circ_f += delta_f
 
-    @staticmethod
-    def _conn_sig(conns: list) -> tuple:
+    def _conn_sig(self, conns: list) -> tuple:
         """Cheap structural fingerprint — used to skip redundant widget rebuilds."""
-        return tuple(
+        return (self._conn_sort,) + tuple(
             (c.get("direction",""), c.get("ip_port",""),
              c.get("nickname",""),  c.get("status",""))
             for c in conns
@@ -1876,13 +1933,33 @@ class DashboardPanel(tk.Frame):
                 c.get("nickname") or c.get("ip_port") or "").lower())
         return list(conns)  # "none" — preserve Tor's order
 
-    def _cycle_conn_sort(self):
-        idx = self._SORT_MODES.index(self._conn_sort)
-        self._conn_sort = self._SORT_MODES[(idx + 1) % len(self._SORT_MODES)]
-        self._conn_sort_btn.config(text=self._SORT_LABELS[self._conn_sort])
-        # Re-render immediately with new sort using cached data
-        self._conn_sig_last = None
-        self.push_connections(self._last_conns)
+    def _show_conn_sort_menu(self):
+        """Open a native tk.Menu to pick the connection sort order."""
+        btn = self._conn_sort_btn
+        bx  = btn.winfo_rootx()
+        by  = btn.winfo_rooty() + btn.winfo_height()
+
+        menu = tk.Menu(btn.winfo_toplevel(), tearoff=False,
+                       bg=self.PANEL, fg=self.TEXT,
+                       activebackground=self.ACCENT, activeforeground="white",
+                       font=self._fui_s, bd=1, activeborderwidth=0)
+
+        for mode in self._SORT_MODES:
+            label  = self._SORT_LABELS[mode]
+            active = (mode == self._conn_sort)
+            def _pick(picked=mode):
+                self._conn_sort = picked
+                self._conn_sort_btn.config(text=self._SORT_LABELS[picked])
+                self._conn_sig_last = None
+                self.push_connections(self._last_conns)
+            menu.add_command(
+                label=f"  {'●' if active else '○'}  {label[2:]}  ",
+                command=_pick)
+
+        try:
+            menu.tk_popup(bx, by, 0)
+        finally:
+            menu.grab_release()
 
     def reset(self):
         """Clear all data — called on disconnect."""
@@ -2197,10 +2274,12 @@ class TorMonitorApp:
         self._ssh_retry_id      = None
         self._ssh_retry_cfg     = None
         self._ssh_retry_mode    = "nyx"
-        self._spin_id     = None
-        self._spin_lbl    = None
-        self._overlay_lbl = None
-        self._log_height  = self._s(160)
+        self._spin_id        = None
+        self._spin_lbl       = None
+        self._overlay_lbl    = None
+        self._log_height     = self._s(160)
+        self._system_updating = False
+        self._update_log_text = None
         self._last_poll_time = time.time()   # for sleep-wake detection
 
         _log.info("=" * 60)
@@ -2257,7 +2336,7 @@ class TorMonitorApp:
             pass
         self.root.configure(bg=self.BG)
         self.root.geometry(f"{self._s(1200)}x{self._s(780)}")
-        self.root.minsize(self._s(900), self._s(680))
+        self.root.minsize(self._s(480), self._s(480))
 
         # Dark styling for the ttk.Combobox popup listbox
         self.root.option_add("*TCombobox*Listbox*Background",       "#090b10")
@@ -2408,6 +2487,13 @@ class TorMonitorApp:
         self._ctrl_wait_lbl = None
         self._ctrl_wait_t0  = 0.0
 
+        # Bind resize for auto-collapse
+        self.root.bind("<Configure>", self._on_window_resize, add="+")
+
+        # Restore sidebar collapsed state from config
+        if self.cfg.get("sidebar_collapsed"):
+            self.root.after(100, self._toggle_sidebar)
+
         # Show splash on startup
         self.root.after(50, self._show_splash)
 
@@ -2417,9 +2503,16 @@ class TorMonitorApp:
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
+        self._sidebar_btn = tk.Button(
+            hdr, text="◀", font=small,
+            bg=self.BG, fg=self.TEXT_DIM, bd=0, cursor="hand2",
+            activebackground=self.BORDER, activeforeground=self.TEXT,
+            padx=8, pady=2, command=self._toggle_sidebar)
+        self._sidebar_btn.pack(side="left", padx=(6, 0), pady=6)
+
         self._view_lbl = tk.Label(hdr, text="Tor Bridge  —  live dashboard",
                                    font=small, fg=self.TEXT_DIM, bg=self.BG)
-        self._view_lbl.pack(side="left", padx=14, pady=8)
+        self._view_lbl.pack(side="left", padx=(8, 14), pady=8)
 
         # View toggle button
         self._view_btn = tk.Button(
@@ -2502,92 +2595,40 @@ class TorMonitorApp:
         self._populate_from_profile(name)
 
     def _show_profile_menu(self):
-        """Open a custom flat dropdown to select a saved connection profile."""
+        """Open a native tk.Menu profile picker.
+
+        Uses tk_popup() which maps to Win32 TrackPopupMenu on Windows — the OS
+        handles grab, outside-click dismiss, Escape, and focus restore natively.
+        No custom grab or coordinate logic needed.
+        """
         names = self._profile_names
         if not names:
             return
 
-        menu = tk.Toplevel(self.root)
-        menu.overrideredirect(True)
-        menu.configure(bg=self.BORDER)
-        menu.attributes("-topmost", True)
+        btn   = self._profile_btn
+        bx    = btn.winfo_rootx()
+        by    = btn.winfo_rooty() + btn.winfo_height()
+        small = self._font(["Segoe UI", "Arial"], self._sf(9))
 
-        btn = self._profile_btn
-        bx  = btn.winfo_rootx()
-        by  = btn.winfo_rooty() + btn.winfo_height() + 2
-        bw  = btn.winfo_width()
-        menu.geometry(f"{bw}x1+{bx}+{by}")   # width matches button; height set after fill
-
-        _selected = [False]
-
-        def _dismiss(e=None):
-            if _selected[0]:
-                return
-            try:
-                menu.destroy()
-            except Exception:
-                pass
-            try:
-                self.root.unbind("<Button-1>", _dismiss_id[0])
-            except Exception:
-                pass
-
-        _dismiss_id = [None]
-        def _bind_dismiss():
-            _dismiss_id[0] = self.root.bind("<Button-1>",
-                lambda e: _dismiss() if not _menu_contains(e.x_root, e.y_root) else None,
-                add="+")
-        menu.after(1, _bind_dismiss)
-
-        def _menu_contains(rx, ry):
-            try:
-                mx = menu.winfo_rootx(); my = menu.winfo_rooty()
-                mw = menu.winfo_width(); mh = menu.winfo_height()
-                return mx <= rx <= mx + mw and my <= ry <= my + mh
-            except Exception:
-                return False
-
-        menu.bind("<Escape>", _dismiss)
-        menu.bind("<FocusOut>", lambda e: menu.after(50, lambda: _dismiss()
-                                                     if not _menu_contains(
-                                                         self.root.winfo_pointerx(),
-                                                         self.root.winfo_pointery()) else None))
+        m = tk.Menu(self.root, tearoff=False,
+                    bg=self.PANEL, fg=self.TEXT,
+                    activebackground=self.ACCENT, activeforeground="white",
+                    font=small, bd=1, activeborderwidth=0)
 
         current = self.profile_var.get()
-        small   = self._font(["Segoe UI", "Arial"], self._sf(9))
-
         for name in names:
-            active = (name == current)
-            bg_row = self.ACCENT if active else self.PANEL
-            fg_lbl = "white"     if active else self.TEXT
-
-            row = tk.Frame(menu, bg=bg_row, cursor="hand2")
-            row.pack(fill="x", padx=1, pady=1)
-            lw  = tk.Label(row, text=f"  {name}", font=small,
-                           fg=fg_lbl, bg=bg_row, anchor="w", padx=6, pady=5)
-            lw.pack(fill="x")
-
-            def _go(n=name, mn=menu):
-                _selected[0] = True
-                try:
-                    self.root.unbind("<Button-1>", _dismiss_id[0])
-                except Exception:
-                    pass
-                mn.destroy()
+            def _pick(n=name):
                 self.profile_var.set(n)
                 self._on_profile_select()
+            m.add_command(label=f"  {name}  ", command=_pick)
+            if name == current:
+                m.entryconfig(m.index("end"),
+                              background=self.ACCENT, foreground="white")
 
-            for w in (row, lw):
-                w.bind("<Button-1>", lambda e, fn=_go: fn())
-                if not active:
-                    w.bind("<Enter>", lambda e, r=row, l=lw:
-                           [x.config(bg=self.BORDER) for x in (r, l)])
-                    w.bind("<Leave>", lambda e, r=row, l=lw, bg=bg_row:
-                           [x.config(bg=bg) for x in (r, l)])
-
-        menu.update_idletasks()
-        menu.geometry(f"{bw}x{menu.winfo_reqheight()}+{bx}+{by}")
-        menu.focus_set()
+        try:
+            m.tk_popup(bx, by, 0)
+        finally:
+            m.grab_release()
 
     def _populate_from_profile(self, name: str):
         """Fill all sidebar connection fields from a saved profile."""
@@ -3088,20 +3129,24 @@ class TorMonitorApp:
                     self.term.render(self._ssh.screen)
 
         elif kind == "bw":
-            _, r, w = msg
-            self.dashboard.push_bw(r, w)
+            if not self._system_updating:
+                _, r, w = msg
+                self.dashboard.push_bw(r, w)
 
         elif kind == "identity":
-            _, d = msg
-            self.dashboard.push_identity(d)
+            if not self._system_updating:
+                _, d = msg
+                self.dashboard.push_identity(d)
 
         elif kind == "conns":
-            _, conns = msg
-            self.dashboard.push_connections(conns)
+            if not self._system_updating:
+                _, conns = msg
+                self.dashboard.push_connections(conns)
 
         elif kind == "circ":
-            _, built, failed = msg
-            self.dashboard.push_circs(built, failed)
+            if not self._system_updating:
+                _, built, failed = msg
+                self.dashboard.push_circs(built, failed)
 
         elif kind == "ctrl_up":
             if getattr(self, "_ctrl_reconnecting", False):
@@ -3117,6 +3162,12 @@ class TorMonitorApp:
                              f"Connected · {self.cfg.get('host', '')}")
 
         elif kind == "ctrl_down":
+            if self._system_updating:
+                self._ctrl = None
+                self._ui_log(
+                    "Control port dropped — system update in progress, "
+                    "will reconnect automatically after update completes", "info")
+                return
             self._ui_log("Tor control port disconnected", "warn")
             self._ctrl = None
             self._ctrl_reconnecting = False
@@ -3146,9 +3197,14 @@ class TorMonitorApp:
                     self._set_status("warn",
                                      f"Control port down · {self.cfg.get('host', '')} — reconnecting…")
                     self._ctrl_retry_count = 0
-                    self._ctrl_retry_id = self.root.after(3000, self._retry_ctrl)
                     self._restart_tor_btn.pack(side="right", padx=(0, 4), pady=3,
                                                before=self._log_toggle_btn)
+                    # On first drop only: check if nyx is still running; relaunch
+                    # if not. Subsequent drops go straight to the retry loop.
+                    if self._ctrl_down_rounds == 1:
+                        self._check_and_relaunch_nyx()
+                    else:
+                        self._ctrl_retry_id = self.root.after(3000, self._retry_ctrl)
 
         elif kind == "ssh_ready":
             mode = msg[1]
@@ -3325,6 +3381,54 @@ class TorMonitorApp:
     # Backoff delays (seconds) for successive control-port reconnect attempts:
     # 3s, 6s, 12s, 24s, 48s, 60s, 60s, 60s, 60s, 60s  (max 10 attempts ≈ 8 min)
     _CTRL_BACKOFF = [3, 6, 12, 24, 48, 60, 60, 60, 60, 60]
+
+    def _check_and_relaunch_nyx(self):
+        """On first ctrl_down: check if nyx is still running; relaunch if not.
+
+        Runs pgrep in a background thread so the UI stays responsive.
+        If nyx has stopped, sends 'nyx\\r\\n' to the existing PTY shell and
+        delays the first ctrl reconnect attempt by 6 s to let nyx start up.
+        If nyx is still running, schedules the normal 3 s first retry.
+        """
+        if not self._ssh or not self._ssh.client:
+            self._ctrl_retry_id = self.root.after(3000, self._retry_ctrl)
+            return
+
+        client = self._ssh.client
+
+        def _worker():
+            nyx_running = False
+            try:
+                transport = client.get_transport()
+                if transport and transport.is_active():
+                    chan = transport.open_session()
+                    chan.exec_command("pgrep -x nyx || pgrep -x arm")
+                    chan.recv(1024)           # discard output
+                    rc = chan.recv_exit_status()
+                    chan.close()
+                    nyx_running = (rc == 0)
+            except Exception as exc:
+                _log.debug("_check_and_relaunch_nyx: pgrep failed: %s", exc)
+
+            self.root.after(0, self._on_nyx_check, nyx_running)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_nyx_check(self, nyx_running: bool):
+        """Called on the UI thread with the result of the nyx process check."""
+        if nyx_running:
+            _log.info("_on_nyx_check: nyx is running — scheduling normal retry")
+            self._ctrl_retry_id = self.root.after(3000, self._retry_ctrl)
+        else:
+            self._ui_log("nyx has stopped — relaunching…", "warn")
+            _log.warning("_on_nyx_check: nyx not found — relaunching via PTY")
+            if self._ssh:
+                try:
+                    self._ssh.send(b"nyx\r\n")
+                except Exception as exc:
+                    _log.error("_on_nyx_check: failed to send nyx command: %s", exc)
+            # Give nyx 6 s to start before the first ctrl reconnect attempt
+            self._ctrl_retry_id = self.root.after(6000, self._retry_ctrl)
 
     def _retry_ctrl(self):
         """Attempt to reconnect the Tor control channel after a drop.
@@ -3520,20 +3624,93 @@ class TorMonitorApp:
 
         self._run_ssh_cmd("sudo systemctl restart tor", on_done=_done_restart)
 
-    def _run_maintenance(self):
-        """Run apt update && apt upgrade on the remote host, streaming output to the debug log.
+    def _show_update_overlay(self):
+        """Replace the dashboard view with a 'System Updating' panel that streams apt output."""
+        self._hide_overlay()
+        ov = tk.Frame(self._view_container, bg=self.BG)
+        ov.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._overlay = ov
 
-        Uses a daemon thread with exec_command so the UI never blocks.  Output
-        is posted line-by-line via root.after() so the log scrolls in real time.
-        The button is disabled for the duration to prevent double-invocation.
+        self._spin_chars = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+        self._spin_idx   = 0
+
+        small = self._font(["Segoe UI", "Arial"], self._sf(9))
+        mono  = self._font(["Cascadia Code", "Consolas", "Courier New"], self._sf(8))
+
+        # Header row
+        hdr = tk.Frame(ov, bg=self.BG)
+        hdr.pack(fill="x", padx=20, pady=(20, 8))
+
+        self._spin_lbl = tk.Label(hdr, text="⠋",
+                                   font=self._font(["Segoe UI","Arial"], self._sf(14)),
+                                   fg=self.ACCENT, bg=self.BG)
+        self._spin_lbl.pack(side="left", padx=(0, 10))
+
+        self._update_hdr_lbl = tk.Label(
+            hdr, text="SYSTEM UPDATE IN PROGRESS",
+            font=self._font(["Segoe UI","Arial"], self._sf(11), bold=True),
+            fg=self.TEXT, bg=self.BG)
+        self._update_hdr_lbl.pack(side="left")
+
+        self._update_sub_lbl = tk.Label(
+            ov, text="Dashboard data is paused until the update completes.",
+            font=small, fg=self.TEXT_DIM, bg=self.BG)
+        self._update_sub_lbl.pack(padx=20, anchor="w")
+
+        # OK button — hidden until update finishes
+        self._update_ok_btn = tk.Button(
+            ov, text="  OK  ",
+            font=self._font(["Segoe UI","Arial"], self._sf(10), bold=True),
+            fg=self.BG, bg=self.ACCENT, activebackground=self.ACCENT,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._finish_dismiss)
+        # (packed later by _finish)
+
+        # Scrollable output log
+        log_frame = tk.Frame(ov, bg="#090b10")
+        log_frame.pack(fill="both", expand=True, padx=20, pady=12)
+
+        sb = ttk.Scrollbar(log_frame, orient="vertical",
+                           style="Dark.Vertical.TScrollbar")
+        self._update_log_text = tk.Text(
+            log_frame, bg="#090b10", fg="#64748b", font=mono,
+            bd=0, highlightthickness=0, state="disabled", wrap="word",
+            yscrollcommand=sb.set,
+            selectbackground=self.BORDER, insertbackground=self.TEXT)
+        sb.config(command=self._update_log_text.yview)
+        sb.pack(side="right", fill="y")
+        self._update_log_text.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+
+        self._spin_tick()
+
+    def _update_overlay_append(self, text: str):
+        """Append a line to the update overlay output log."""
+        w = self._update_log_text
+        if w is None:
+            return
+        try:
+            w.configure(state="normal")
+            w.insert("end", text + "\n")
+            w.configure(state="disabled")
+            w.see("end")
+        except Exception:
+            pass
+
+    def _run_maintenance(self):
+        """Run apt update && apt dist-upgrade on the remote host.
+
+        Replaces the dashboard with an update overlay that streams apt output.
+        Data flow to dashboard tiles is paused for the duration.
         """
         if not self._ssh or not self._ssh.client:
             self._ui_log("Cannot run update: SSH not connected", "warn")
             return
 
         client = self._ssh.client
+        self._system_updating = True
         self._maintenance_btn.config(state="disabled", text="⬆ Updating…")
-        self._ui_log("Starting system update (apt update && apt upgrade)…", "info")
+        self._show_update_overlay()
+        self._ui_log("Starting system update (apt update && apt dist-upgrade)…", "info")
 
         def _worker():
             try:
@@ -3543,7 +3720,7 @@ class TorMonitorApp:
                 chan = transport.open_session()
                 chan.exec_command(
                     "DEBIAN_FRONTEND=noninteractive sudo apt-get update -y"
-                    " && DEBIAN_FRONTEND=noninteractive sudo apt-get upgrade -y"
+                    " && DEBIAN_FRONTEND=noninteractive sudo apt-get dist-upgrade -y"
                     " 2>&1")
                 buf = b""
                 while True:
@@ -3557,11 +3734,13 @@ class TorMonitorApp:
                         text = line.decode(errors="replace").rstrip("\r")
                         if text:
                             self.root.after(0, self._ui_log, text, "info")
+                            self.root.after(0, self._update_overlay_append, text)
                 # Flush any remaining partial line
                 if buf:
                     text = buf.decode(errors="replace").rstrip("\r\n")
                     if text:
                         self.root.after(0, self._ui_log, text, "info")
+                        self.root.after(0, self._update_overlay_append, text)
                 rc = chan.recv_exit_status()
                 chan.close()
                 ok = (rc == 0)
@@ -3569,21 +3748,66 @@ class TorMonitorApp:
                 ok = False
                 self.root.after(0, self._ui_log,
                                 f"System update error: {exc}", "warn")
+                self.root.after(0, self._update_overlay_append,
+                                f"Error: {exc}")
 
             def _finish():
+                self._system_updating = False
                 if ok:
                     self._ui_log("System update completed successfully ✓", "ok")
+                    summary = "Update completed successfully ✓"
+                    hdr_text = "UPDATE COMPLETE ✓"
+                    hdr_color = "#4ade80"   # green
                 else:
-                    self._ui_log("System update finished with errors — check output above",
-                                 "warn")
+                    self._ui_log(
+                        "System update finished with errors — check output above", "warn")
+                    summary = "Update finished with errors — see output above"
+                    hdr_text = "UPDATE FINISHED WITH ERRORS"
+                    hdr_color = "#fb923c"   # orange
+
+                # Flip overlay into completed state
                 try:
-                    self._maintenance_btn.config(state="normal", text="⬆ Update System")
+                    self._spin_lbl.config(text="●", fg=hdr_color)
+                    self._update_hdr_lbl.config(text=hdr_text, fg=hdr_color)
+                    self._update_sub_lbl.config(text=summary)
+                    self._update_overlay_append("─" * 60)
+                    self._update_overlay_append(summary)
+                    self._update_ok_btn.pack(pady=(0, 20))
                 except Exception:
                     pass
+
+                # Auto-dismiss after 6 s in case the user walks away
+                self._update_autodismiss_id = self.root.after(
+                    6000, self._finish_dismiss)
 
             self.root.after(0, _finish)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_dismiss(self):
+        """Dismiss the update completion overlay and restart the control port."""
+        # Cancel auto-dismiss timer if the user clicked OK first (or vice versa)
+        if getattr(self, "_update_autodismiss_id", None):
+            try:
+                self.root.after_cancel(self._update_autodismiss_id)
+            except Exception:
+                pass
+            self._update_autodismiss_id = None
+
+        self._update_log_text = None
+        self._hide_overlay()
+
+        try:
+            self._maintenance_btn.config(state="normal", text="⬆ Update System")
+        except Exception:
+            pass
+
+        # Restart control port if it dropped during the update
+        if not (self._ctrl and self._ctrl.is_alive()):
+            self._ctrl_down_rounds = 0
+            self._ctrl_retry_count = 0
+            self._ui_log("Reconnecting control port after system update…", "info")
+            self._ctrl_retry_id = self.root.after(2000, self._retry_ctrl)
 
     def _on_disconnected(self):
         self.dashboard.reset()
@@ -3659,7 +3883,7 @@ class TorMonitorApp:
     # ─────────────────────────────────────────────────────────────────────────
     def _show_overlay(self, text: str = "Connecting…"):
         self._hide_overlay()
-        ov = tk.Frame(self._right, bg=self.BG)
+        ov = tk.Frame(self._view_container, bg=self.BG)
         ov.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overlay = ov
 
@@ -3698,7 +3922,7 @@ class TorMonitorApp:
         """
         self._hide_overlay()
 
-        ov = tk.Frame(self._right, bg=self.BG)
+        ov = tk.Frame(self._view_container, bg=self.BG)
         ov.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overlay = ov
 
@@ -3818,7 +4042,7 @@ class TorMonitorApp:
         """Idle splash — keyboard-navigable connect picker."""
         self._hide_overlay()
 
-        ov = tk.Frame(self._right, bg=self.BG)
+        ov = tk.Frame(self._view_container, bg=self.BG)
         ov.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overlay = ov
 
@@ -3950,14 +4174,26 @@ class TorMonitorApp:
             for btn in self._nyx_btns:
                 btn.pack_forget()
 
-    def _toggle_sidebar(self):
+    def _toggle_sidebar(self, force_collapse: bool = False):
+        if force_collapse and not self._sidebar_vis:
+            return
         if self._sidebar_vis:
             self._sidebar.pack_forget()
             self._hide_btn.config(text="▶  Show Panel")
+            self._sidebar_btn.config(text="▶")
         else:
             self._sidebar.pack(side="left", fill="y", before=self._right)
             self._hide_btn.config(text="◀  Hide Panel")
+            self._sidebar_btn.config(text="◀")
         self._sidebar_vis = not self._sidebar_vis
+        self.cfg["sidebar_collapsed"] = not self._sidebar_vis
+        save_config(self.cfg)
+
+    def _on_window_resize(self, event):
+        if event.widget is not self.root:
+            return
+        if event.width < self._s(620) and self._sidebar_vis:
+            self._toggle_sidebar(force_collapse=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Dashboard graph mode picker
@@ -3985,18 +4221,17 @@ class TorMonitorApp:
             except Exception:
                 pass
             try:
-                self.root.unbind("<Button-1>", _dismiss_id[0])
+                self.root.unbind("<ButtonRelease-1>", _dismiss_id[0])
             except Exception:
                 pass
 
         # Dismiss when clicking anywhere outside the menu
-        # Use after(1) so this bind doesn't immediately fire on the button click
         _dismiss_id = [None]
         def _bind_dismiss():
-            _dismiss_id[0] = self.root.bind("<Button-1>",
+            _dismiss_id[0] = self.root.bind("<ButtonRelease-1>",
                 lambda e: _dismiss() if not _menu_contains(e.x_root, e.y_root) else None,
                 add="+")
-        menu.after(1, _bind_dismiss)
+        menu.after(250, _bind_dismiss)
 
         def _menu_contains(rx, ry):
             try:
@@ -4010,10 +4245,6 @@ class TorMonitorApp:
 
         # Also dismiss on Escape
         menu.bind("<Escape>", _dismiss)
-        menu.bind("<FocusOut>", lambda e: menu.after(50, lambda: _dismiss()
-                                                     if not _menu_contains(
-                                                         self.root.winfo_pointerx(),
-                                                         self.root.winfo_pointery()) else None))
 
         small     = self._font(["Segoe UI","Arial"], self._sf(9))
         small_dim = self._font(["Segoe UI","Arial"], self._sf(8))
@@ -4039,7 +4270,7 @@ class TorMonitorApp:
             def _go(m=mode_name, mn=menu):
                 _selected[0] = True
                 try:
-                    self.root.unbind("<Button-1>", _dismiss_id[0])
+                    self.root.unbind("<ButtonRelease-1>", _dismiss_id[0])
                 except Exception:
                     pass
                 mn.destroy()
@@ -4055,7 +4286,6 @@ class TorMonitorApp:
                         [x.config(bg=bg) for x in (r, i2, l, s)])
 
         menu.update_idletasks()
-        menu.focus_set()
 
     def _set_graph_mode(self, mode: str):
         """Switch the dashboard sparkline to the given mode."""
@@ -4080,15 +4310,33 @@ class TorMonitorApp:
 
         _selected = [False]
 
+        def _menu_contains(rx, ry):
+            try:
+                mx = menu.winfo_rootx(); my = menu.winfo_rooty()
+                mw = menu.winfo_width(); mh = menu.winfo_height()
+                return mx <= rx <= mx + mw and my <= ry <= my + mh
+            except Exception:
+                return False
+
         def _dismiss(e=None):
             if _selected[0]:
                 return
             try:
-                self._actions_btn.focus_set()
-                menu.after(0, menu.destroy)
+                self.root.unbind("<ButtonRelease-1>", _dismiss_id[0])
             except Exception:
                 pass
-        menu.bind("<FocusOut>", _dismiss)
+            try:
+                menu.destroy()
+            except Exception:
+                pass
+
+        _dismiss_id = [None]
+        def _bind_dismiss():
+            _dismiss_id[0] = self.root.bind("<ButtonRelease-1>",
+                lambda e: _dismiss() if not _menu_contains(e.x_root, e.y_root) else None,
+                add="+")
+        menu.after(250, _bind_dismiss)
+        menu.bind("<Escape>", _dismiss)
 
         small = self._font(["Segoe UI","Arial"], self._sf(9))
         mono  = self._font(["Cascadia Code","Consolas","Courier New"], self._sf(9))
@@ -4113,6 +4361,10 @@ class TorMonitorApp:
             def _run(c=cmd, conf=confirm, m=menu):
                 _selected[0] = True
                 try:
+                    self.root.unbind("<ButtonRelease-1>", _dismiss_id[0])
+                except Exception:
+                    pass
+                try:
                     m.destroy()
                 except Exception:
                     pass
@@ -4130,7 +4382,6 @@ class TorMonitorApp:
                     [x.config(bg=self.PANEL) for x in (r, i, l, c)])
 
         menu.update_idletasks()
-        menu.focus_set()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Terminal input
@@ -4174,6 +4425,8 @@ class TorMonitorApp:
                     "ctrl":"info","conn":"info"}
         _log.log(getattr(logging, _lvl_map.get(level,"info").upper(), logging.INFO),
                  "UI  %s", msg)
+        if level in ("warn", "error") and not self._log_vis:
+            self._toggle_log()
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         w  = self._log_text
         w.configure(state="normal")
